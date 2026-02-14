@@ -2,7 +2,8 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { execSync } from "node:child_process";
-import { basename, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { getDatabase, resolvePartialId } from "../db/database.js";
 import {
   createTask,
@@ -632,9 +633,14 @@ program
   .command("mcp")
   .description("Start MCP server (stdio)")
   .option("--register <agent>", "Register MCP server with an agent (claude, codex, gemini, all)")
+  .option("--unregister <agent>", "Unregister MCP server from an agent (claude, codex, gemini, all)")
   .action(async (opts) => {
     if (opts.register) {
       registerMcp(opts.register);
+      return;
+    }
+    if (opts.unregister) {
+      unregisterMcp(opts.unregister);
       return;
     }
 
@@ -642,51 +648,210 @@ program
     await import("../mcp/index.js");
   });
 
-function registerMcp(agent: string) {
+// --- MCP Registration Helpers ---
+
+const HOME = process.env["HOME"] || process.env["USERPROFILE"] || "~";
+
+function getMcpBinaryPath(): string {
+  // Resolve the actual todos-mcp binary location
+  try {
+    const p = execSync("which todos-mcp", { encoding: "utf-8" }).trim();
+    if (p) return p;
+  } catch { /* fall through */ }
+
+  // Fallback: check common bun global bin
+  const bunBin = join(HOME, ".bun", "bin", "todos-mcp");
+  if (existsSync(bunBin)) return bunBin;
+
+  // Last resort: assume it's on PATH
+  return "todos-mcp";
+}
+
+function readJsonFile(path: string): Record<string, unknown> {
+  if (!existsSync(path)) return {};
+  try {
+    return JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function writeJsonFile(path: string, data: Record<string, unknown>): void {
+  const dir = dirname(path);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(path, JSON.stringify(data, null, 2) + "\n");
+}
+
+function readTomlFile(path: string): string {
+  if (!existsSync(path)) return "";
+  return readFileSync(path, "utf-8");
+}
+
+function writeTomlFile(path: string, content: string): void {
+  const dir = dirname(path);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(path, content);
+}
+
+// --- Claude Code: .mcp.json at project root (flat object, no wrapper) ---
+
+function registerClaude(binPath: string): void {
+  const cwd = process.cwd();
+  const configPath = join(cwd, ".mcp.json");
+  const config = readJsonFile(configPath);
+
+  config["todos"] = {
+    command: binPath,
+    args: [] as string[],
+  };
+
+  writeJsonFile(configPath, config);
+  console.log(chalk.green(`Claude Code: registered in ${configPath}`));
+}
+
+function unregisterClaude(): void {
+  const cwd = process.cwd();
+  const configPath = join(cwd, ".mcp.json");
+  const config = readJsonFile(configPath);
+
+  if (!("todos" in config)) {
+    console.log(chalk.dim(`Claude Code: todos not found in ${configPath}`));
+    return;
+  }
+
+  delete config["todos"];
+  writeJsonFile(configPath, config);
+  console.log(chalk.green(`Claude Code: unregistered from ${configPath}`));
+}
+
+// --- Codex CLI: ~/.codex/config.toml (TOML, [mcp_servers.todos]) ---
+
+function registerCodex(binPath: string): void {
+  const configPath = join(HOME, ".codex", "config.toml");
+  let content = readTomlFile(configPath);
+
+  // Remove existing [mcp_servers.todos] block if present
+  content = removeTomlBlock(content, "mcp_servers.todos");
+
+  // Append new block
+  const block = `\n[mcp_servers.todos]\ncommand = "${binPath}"\nargs = []\n`;
+  content = content.trimEnd() + "\n" + block;
+
+  writeTomlFile(configPath, content);
+  console.log(chalk.green(`Codex CLI: registered in ${configPath}`));
+}
+
+function unregisterCodex(): void {
+  const configPath = join(HOME, ".codex", "config.toml");
+  let content = readTomlFile(configPath);
+
+  if (!content.includes("[mcp_servers.todos]")) {
+    console.log(chalk.dim(`Codex CLI: todos not found in ${configPath}`));
+    return;
+  }
+
+  content = removeTomlBlock(content, "mcp_servers.todos");
+  writeTomlFile(configPath, content.trimEnd() + "\n");
+  console.log(chalk.green(`Codex CLI: unregistered from ${configPath}`));
+}
+
+function removeTomlBlock(content: string, blockName: string): string {
+  const lines = content.split("\n");
+  const result: string[] = [];
+  let skipping = false;
+  const header = `[${blockName}]`;
+
+  for (const line of lines) {
+    if (line.trim() === header) {
+      skipping = true;
+      continue;
+    }
+    // Stop skipping when we hit the next section header
+    if (skipping && line.trim().startsWith("[")) {
+      skipping = false;
+    }
+    if (!skipping) {
+      result.push(line);
+    }
+  }
+
+  return result.join("\n");
+}
+
+// --- Gemini CLI: ~/.gemini/settings.json (JSON, mcpServers wrapper) ---
+
+function registerGemini(binPath: string): void {
+  const configPath = join(HOME, ".gemini", "settings.json");
+  const config = readJsonFile(configPath);
+
+  if (!config["mcpServers"]) {
+    config["mcpServers"] = {};
+  }
+  const servers = config["mcpServers"] as Record<string, unknown>;
+  servers["todos"] = {
+    command: binPath,
+    args: [] as string[],
+  };
+
+  writeJsonFile(configPath, config);
+  console.log(chalk.green(`Gemini CLI: registered in ${configPath}`));
+}
+
+function unregisterGemini(): void {
+  const configPath = join(HOME, ".gemini", "settings.json");
+  const config = readJsonFile(configPath);
+  const servers = config["mcpServers"] as Record<string, unknown> | undefined;
+
+  if (!servers || !("todos" in servers)) {
+    console.log(chalk.dim(`Gemini CLI: todos not found in ${configPath}`));
+    return;
+  }
+
+  delete servers["todos"];
+  writeJsonFile(configPath, config);
+  console.log(chalk.green(`Gemini CLI: unregistered from ${configPath}`));
+}
+
+// --- Main register/unregister ---
+
+function registerMcp(agent: string): void {
   const agents = agent === "all" ? ["claude", "codex", "gemini"] : [agent];
+  const binPath = getMcpBinaryPath();
 
   for (const a of agents) {
     switch (a) {
-      case "claude": {
-        const configPath = resolve(
-          process.env["HOME"] || "~",
-          ".claude",
-          "claude_code_config.json",
-        );
-        console.log(chalk.bold("Claude Code MCP Registration:"));
-        console.log(`Add to ${configPath}:\n`);
-        console.log(JSON.stringify({
-          mcpServers: {
-            todos: {
-              command: "todos-mcp",
-              args: [],
-            },
-          },
-        }, null, 2));
+      case "claude":
+        registerClaude(binPath);
         break;
-      }
       case "codex":
-        console.log(chalk.bold("Codex MCP Registration:"));
-        console.log("Add to your codex config:\n");
-        console.log(JSON.stringify({
-          mcpServers: {
-            todos: { command: "todos-mcp" },
-          },
-        }, null, 2));
+        registerCodex(binPath);
         break;
       case "gemini":
-        console.log(chalk.bold("Gemini MCP Registration:"));
-        console.log("Add to your gemini config:\n");
-        console.log(JSON.stringify({
-          mcpServers: {
-            todos: { command: "todos-mcp" },
-          },
-        }, null, 2));
+        registerGemini(binPath);
         break;
       default:
         console.error(chalk.red(`Unknown agent: ${a}. Use: claude, codex, gemini, all`));
     }
-    console.log();
+  }
+}
+
+function unregisterMcp(agent: string): void {
+  const agents = agent === "all" ? ["claude", "codex", "gemini"] : [agent];
+
+  for (const a of agents) {
+    switch (a) {
+      case "claude":
+        unregisterClaude();
+        break;
+      case "codex":
+        unregisterCodex();
+        break;
+      case "gemini":
+        unregisterGemini();
+        break;
+      default:
+        console.error(chalk.red(`Unknown agent: ${a}. Use: claude, codex, gemini, all`));
+    }
   }
 }
 
