@@ -31,6 +31,11 @@ const program = new Command();
 
 // Helpers
 
+function handleError(e: unknown): never {
+  console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+  process.exit(1);
+}
+
 function resolveTaskId(partialId: string): string {
   const db = getDatabase();
   const id = resolvePartialId(db, "tasks", partialId);
@@ -268,15 +273,20 @@ program
       process.exit(1);
     }
 
-    const task = updateTask(resolvedId, {
-      version: current.version,
-      title: opts.title,
-      description: opts.description,
-      status: opts.status as TaskStatus | undefined,
-      priority: opts.priority as TaskPriority | undefined,
-      assigned_to: opts.assign,
-      tags: opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : undefined,
-    });
+    let task;
+    try {
+      task = updateTask(resolvedId, {
+        version: current.version,
+        title: opts.title,
+        description: opts.description,
+        status: opts.status as TaskStatus | undefined,
+        priority: opts.priority as TaskPriority | undefined,
+        assigned_to: opts.assign,
+        tags: opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : undefined,
+      });
+    } catch (e) {
+      handleError(e);
+    }
 
     if (globalOpts.json) {
       output(task, true);
@@ -293,7 +303,12 @@ program
   .action((id: string) => {
     const globalOpts = program.opts();
     const resolvedId = resolveTaskId(id);
-    const task = completeTask(resolvedId, globalOpts.agent);
+    let task;
+    try {
+      task = completeTask(resolvedId, globalOpts.agent);
+    } catch (e) {
+      handleError(e);
+    }
 
     if (globalOpts.json) {
       output(task, true);
@@ -311,7 +326,12 @@ program
     const globalOpts = program.opts();
     const agentId = globalOpts.agent || "cli";
     const resolvedId = resolveTaskId(id);
-    const task = startTask(resolvedId, agentId);
+    let task;
+    try {
+      task = startTask(resolvedId, agentId);
+    } catch (e) {
+      handleError(e);
+    }
 
     if (globalOpts.json) {
       output(task, true);
@@ -329,7 +349,12 @@ program
     const globalOpts = program.opts();
     const agentId = globalOpts.agent || "cli";
     const resolvedId = resolveTaskId(id);
-    const result = lockTask(resolvedId, agentId);
+    let result;
+    try {
+      result = lockTask(resolvedId, agentId);
+    } catch (e) {
+      handleError(e);
+    }
 
     if (globalOpts.json) {
       output(result, true);
@@ -348,7 +373,11 @@ program
   .action((id: string) => {
     const globalOpts = program.opts();
     const resolvedId = resolveTaskId(id);
-    unlockTask(resolvedId, globalOpts.agent);
+    try {
+      unlockTask(resolvedId, globalOpts.agent);
+    } catch (e) {
+      handleError(e);
+    }
 
     if (globalOpts.json) {
       output({ success: true }, true);
@@ -487,7 +516,12 @@ program
 
     if (opts.needs) {
       const depId = resolveTaskId(opts.needs);
-      addDependency(resolvedId, depId);
+      try {
+        addDependency(resolvedId, depId);
+      } catch (e) {
+        console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+        process.exit(1);
+      }
       if (globalOpts.json) {
         output({ task_id: resolvedId, depends_on: depId }, true);
       } else {
