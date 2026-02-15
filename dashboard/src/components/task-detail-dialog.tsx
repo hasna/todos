@@ -103,10 +103,28 @@ export function TaskDetailDialog({
                 {task.project_name}
               </div>
             )}
+            {task.agent_id && (
+              <div>
+                <span className="text-muted-foreground">Agent:</span>{" "}
+                {task.agent_id}
+              </div>
+            )}
+            {task.session_id && (
+              <div>
+                <span className="text-muted-foreground">Session:</span>{" "}
+                <span className="font-mono text-xs">{task.session_id}</span>
+              </div>
+            )}
             {task.assigned_to && (
               <div>
                 <span className="text-muted-foreground">Assigned to:</span>{" "}
                 {task.assigned_to}
+              </div>
+            )}
+            {task.working_dir && (
+              <div className="col-span-2">
+                <span className="text-muted-foreground">Working Dir:</span>{" "}
+                <span className="font-mono text-xs">{task.working_dir}</span>
               </div>
             )}
             {task.locked_by && (

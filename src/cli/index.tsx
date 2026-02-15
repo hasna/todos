@@ -227,8 +227,10 @@ program
     if (task.description) console.log(`  ${chalk.dim("Desc:")}     ${task.description}`);
     if (task.assigned_to) console.log(`  ${chalk.dim("Assigned:")} ${task.assigned_to}`);
     if (task.agent_id) console.log(`  ${chalk.dim("Agent:")}    ${task.agent_id}`);
+    if (task.session_id) console.log(`  ${chalk.dim("Session:")}  ${task.session_id}`);
     if (task.locked_by) console.log(`  ${chalk.dim("Locked:")}   ${task.locked_by} (at ${task.locked_at})`);
     if (task.project_id) console.log(`  ${chalk.dim("Project:")}  ${task.project_id}`);
+    if (task.working_dir) console.log(`  ${chalk.dim("WorkDir:")}  ${task.working_dir}`);
     if (task.parent) console.log(`  ${chalk.dim("Parent:")}   ${task.parent.id.slice(0, 8)} | ${task.parent.title}`);
     if (task.tags.length > 0) console.log(`  ${chalk.dim("Tags:")}     ${task.tags.join(", ")}`);
     console.log(`  ${chalk.dim("Version:")}  ${task.version}`);

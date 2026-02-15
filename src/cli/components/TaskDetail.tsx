@@ -45,10 +45,34 @@ export function TaskDetail({ task }: TaskDetailProps) {
             <Text>{task.description}</Text>
           </Box>
         )}
+        {task.agent_id && (
+          <Box>
+            <Text dimColor>{"Agent:    "}</Text>
+            <Text color="cyan">{task.agent_id}</Text>
+          </Box>
+        )}
+        {task.session_id && (
+          <Box>
+            <Text dimColor>{"Session:  "}</Text>
+            <Text>{task.session_id}</Text>
+          </Box>
+        )}
         {task.assigned_to && (
           <Box>
             <Text dimColor>{"Assigned: "}</Text>
             <Text color="cyan">{task.assigned_to}</Text>
+          </Box>
+        )}
+        {task.project_id && (
+          <Box>
+            <Text dimColor>{"Project:  "}</Text>
+            <Text>{task.project_id}</Text>
+          </Box>
+        )}
+        {task.working_dir && (
+          <Box>
+            <Text dimColor>{"Work Dir: "}</Text>
+            <Text>{task.working_dir}</Text>
           </Box>
         )}
         {task.locked_by && (

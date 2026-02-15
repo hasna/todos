@@ -8,7 +8,9 @@ export interface TaskView {
   project_name?: string;
   parent_id?: string;
   agent_id?: string;
+  session_id?: string;
   assigned_to?: string;
+  working_dir?: string;
   tags: string[];
   metadata: Record<string, unknown>;
   version: number;
