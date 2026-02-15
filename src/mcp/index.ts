@@ -93,7 +93,10 @@ server.tool(
   },
   async (params) => {
     try {
-      const task = createTask(params);
+      const resolved = { ...params };
+      if (resolved.project_id) resolved.project_id = resolveId(resolved.project_id, "projects");
+      if (resolved.parent_id) resolved.parent_id = resolveId(resolved.parent_id);
+      const task = createTask(resolved);
       return { content: [{ type: "text" as const, text: `Task created:\n${formatTask(task)}` }] };
     } catch (e) {
       return { content: [{ type: "text" as const, text: formatError(e) }], isError: true };
@@ -120,7 +123,9 @@ server.tool(
   },
   async (params) => {
     try {
-      const tasks = listTasks(params);
+      const resolved = { ...params };
+      if (resolved.project_id) resolved.project_id = resolveId(resolved.project_id, "projects");
+      const tasks = listTasks(resolved);
       if (tasks.length === 0) {
         return { content: [{ type: "text" as const, text: "No tasks found." }] };
       }
@@ -436,7 +441,8 @@ server.tool(
   },
   async ({ query, project_id }) => {
     try {
-      const tasks = searchTasks(query, project_id);
+      const resolvedProjectId = project_id ? resolveId(project_id, "projects") : undefined;
+      const tasks = searchTasks(query, resolvedProjectId);
       if (tasks.length === 0) {
         return { content: [{ type: "text" as const, text: `No tasks matching "${query}".` }] };
       }
