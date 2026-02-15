@@ -23,7 +23,9 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "dev:cli": "bun run src/cli/index.tsx",
-    "dev:mcp": "bun run src/mcp/index.ts"
+    "dev:mcp": "bun run src/mcp/index.ts",
+    "build:dashboard": "cd dashboard && bun install && bun run build",
+    "dev:dashboard": "cd dashboard && bun run dev"
   },
   "keywords": [
     "todos",

@@ -855,6 +855,18 @@ function unregisterMcp(agent: string): void {
   }
 }
 
+// serve (dashboard)
+program
+  .command("serve")
+  .aliases(["dashboard", "open"])
+  .description("Start the web dashboard")
+  .option("-p, --port <port>", "Port number", "19420")
+  .option("--no-open", "Don't auto-open browser")
+  .action(async (opts) => {
+    const { startServer } = await import("../server/serve.js");
+    await startServer(parseInt(opts.port, 10), { open: opts.open });
+  });
+
 // interactive (TUI)
 program
   .command("interactive")
