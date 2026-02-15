@@ -21,6 +21,7 @@ import {
   listProjects,
 } from "../db/projects.js";
 import { searchTasks } from "../lib/search.js";
+import { pushToClaudeTaskList, pullFromClaudeTaskList, syncClaudeTaskList } from "../lib/claude-tasks.js";
 import { getDatabase, resolvePartialId } from "../db/database.js";
 import {
   VersionConflictError,
@@ -450,6 +451,55 @@ server.tool(
         `[${t.status}] ${t.id.slice(0, 8)} | ${t.priority} | ${t.title}`,
       ).join("\n");
       return { content: [{ type: "text" as const, text: `${tasks.length} result(s) for "${query}":\n${text}` }] };
+    } catch (e) {
+      return { content: [{ type: "text" as const, text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+// 16. sync
+server.tool(
+  "sync",
+  "Sync tasks with a Claude Code task list. Auto-detects task list from session ID if not specified. Use --push to write SQLite tasks to Claude task list, --pull to import, or both for bidirectional sync.",
+  {
+    task_list_id: z.string().optional().describe("Claude Code task list ID (defaults to session ID)"),
+    project_id: z.string().optional().describe("Limit sync to a project"),
+    direction: z.enum(["push", "pull", "both"]).optional().describe("Sync direction: push (SQLite->Claude), pull (Claude->SQLite), or both (default)"),
+  },
+  async ({ task_list_id, project_id, direction }) => {
+    try {
+      const resolvedProjectId = project_id ? resolveId(project_id, "projects") : undefined;
+
+      // Auto-detect task list ID from env vars
+      const taskListId = task_list_id
+        || process.env["TODOS_CLAUDE_TASK_LIST"]
+        || process.env["CLAUDE_CODE_TASK_LIST_ID"]
+        || process.env["CLAUDE_CODE_SESSION_ID"];
+
+      if (!taskListId) {
+        return { content: [{ type: "text" as const, text: "Could not detect task list ID. Pass task_list_id or set CLAUDE_CODE_TASK_LIST_ID." }], isError: true };
+      }
+
+      let result;
+      if (direction === "push") {
+        result = pushToClaudeTaskList(taskListId, resolvedProjectId);
+      } else if (direction === "pull") {
+        result = pullFromClaudeTaskList(taskListId, resolvedProjectId);
+      } else {
+        result = syncClaudeTaskList(taskListId, resolvedProjectId);
+      }
+
+      const parts: string[] = [];
+      if (result.pulled > 0) parts.push(`Pulled ${result.pulled} task(s) from Claude task list.`);
+      if (result.pushed > 0) parts.push(`Pushed ${result.pushed} task(s) to Claude task list.`);
+      if (result.pulled === 0 && result.pushed === 0 && result.errors.length === 0) {
+        parts.push("Nothing to sync.");
+      }
+      for (const err of result.errors) {
+        parts.push(`Error: ${err}`);
+      }
+
+      return { content: [{ type: "text" as const, text: parts.join("\n") }] };
     } catch (e) {
       return { content: [{ type: "text" as const, text: formatError(e) }], isError: true };
     }
