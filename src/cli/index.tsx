@@ -646,13 +646,14 @@ program
   .description("Start MCP server (stdio)")
   .option("--register <agent>", "Register MCP server with an agent (claude, codex, gemini, all)")
   .option("--unregister <agent>", "Unregister MCP server from an agent (claude, codex, gemini, all)")
+  .option("-g, --global", "Register/unregister globally (user-level) instead of project-level")
   .action(async (opts) => {
     if (opts.register) {
-      registerMcp(opts.register);
+      registerMcp(opts.register, opts.global);
       return;
     }
     if (opts.unregister) {
-      unregisterMcp(opts.unregister);
+      unregisterMcp(opts.unregister, opts.global);
       return;
     }
 
@@ -705,35 +706,44 @@ function writeTomlFile(path: string, content: string): void {
   writeFileSync(path, content);
 }
 
-// --- Claude Code: .mcp.json at project root (flat object, no wrapper) ---
+// --- Claude Code: .mcp.json at project root (mcpServers wrapper) ---
 
-function registerClaude(binPath: string): void {
-  const cwd = process.cwd();
-  const configPath = join(cwd, ".mcp.json");
+function registerClaude(binPath: string, global?: boolean): void {
+  const configPath = global
+    ? join(HOME, ".claude", ".mcp.json")
+    : join(process.cwd(), ".mcp.json");
   const config = readJsonFile(configPath);
 
-  config["todos"] = {
+  if (!config["mcpServers"]) {
+    config["mcpServers"] = {};
+  }
+  const servers = config["mcpServers"] as Record<string, unknown>;
+  servers["todos"] = {
     command: binPath,
     args: [] as string[],
   };
 
   writeJsonFile(configPath, config);
-  console.log(chalk.green(`Claude Code: registered in ${configPath}`));
+  const scope = global ? "global" : "project";
+  console.log(chalk.green(`Claude Code (${scope}): registered in ${configPath}`));
 }
 
-function unregisterClaude(): void {
-  const cwd = process.cwd();
-  const configPath = join(cwd, ".mcp.json");
+function unregisterClaude(global?: boolean): void {
+  const configPath = global
+    ? join(HOME, ".claude", ".mcp.json")
+    : join(process.cwd(), ".mcp.json");
   const config = readJsonFile(configPath);
+  const servers = config["mcpServers"] as Record<string, unknown> | undefined;
 
-  if (!("todos" in config)) {
+  if (!servers || !("todos" in servers)) {
     console.log(chalk.dim(`Claude Code: todos not found in ${configPath}`));
     return;
   }
 
-  delete config["todos"];
+  delete servers["todos"];
   writeJsonFile(configPath, config);
-  console.log(chalk.green(`Claude Code: unregistered from ${configPath}`));
+  const scope = global ? "global" : "project";
+  console.log(chalk.green(`Claude Code (${scope}): unregistered from ${configPath}`));
 }
 
 // --- Codex CLI: ~/.codex/config.toml (TOML, [mcp_servers.todos]) ---
@@ -826,14 +836,14 @@ function unregisterGemini(): void {
 
 // --- Main register/unregister ---
 
-function registerMcp(agent: string): void {
+function registerMcp(agent: string, global?: boolean): void {
   const agents = agent === "all" ? ["claude", "codex", "gemini"] : [agent];
   const binPath = getMcpBinaryPath();
 
   for (const a of agents) {
     switch (a) {
       case "claude":
-        registerClaude(binPath);
+        registerClaude(binPath, global);
         break;
       case "codex":
         registerCodex(binPath);
@@ -847,13 +857,13 @@ function registerMcp(agent: string): void {
   }
 }
 
-function unregisterMcp(agent: string): void {
+function unregisterMcp(agent: string, global?: boolean): void {
   const agents = agent === "all" ? ["claude", "codex", "gemini"] : [agent];
 
   for (const a of agents) {
     switch (a) {
       case "claude":
-        unregisterClaude();
+        unregisterClaude(global);
         break;
       case "codex":
         unregisterCodex();
