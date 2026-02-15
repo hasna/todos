@@ -460,25 +460,16 @@ server.tool(
 // 16. sync
 server.tool(
   "sync",
-  "Sync tasks with a Claude Code task list. Auto-detects task list from session ID if not specified. Use --push to write SQLite tasks to Claude task list, --pull to import, or both for bidirectional sync.",
+  "Sync tasks with a Claude Code task list. Writes SQLite tasks as JSON files to ~/.claude/tasks/<task_list_id>/ so they appear in Claude Code's native task UI. The task_list_id is your Claude Code session ID (visible in the conversation or via CLAUDE_CODE_SESSION_ID).",
   {
-    task_list_id: z.string().optional().describe("Claude Code task list ID (defaults to session ID)"),
+    task_list_id: z.string().describe("Claude Code task list ID — use your session ID"),
     project_id: z.string().optional().describe("Limit sync to a project"),
     direction: z.enum(["push", "pull", "both"]).optional().describe("Sync direction: push (SQLite->Claude), pull (Claude->SQLite), or both (default)"),
   },
   async ({ task_list_id, project_id, direction }) => {
     try {
       const resolvedProjectId = project_id ? resolveId(project_id, "projects") : undefined;
-
-      // Auto-detect task list ID from env vars
-      const taskListId = task_list_id
-        || process.env["TODOS_CLAUDE_TASK_LIST"]
-        || process.env["CLAUDE_CODE_TASK_LIST_ID"]
-        || process.env["CLAUDE_CODE_SESSION_ID"];
-
-      if (!taskListId) {
-        return { content: [{ type: "text" as const, text: "Could not detect task list ID. Pass task_list_id or set CLAUDE_CODE_TASK_LIST_ID." }], isError: true };
-      }
+      const taskListId = task_list_id;
 
       let result;
       if (direction === "push") {
