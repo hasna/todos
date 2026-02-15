@@ -152,18 +152,16 @@ export function pullFromClaudeTaskList(taskListId: string, projectId?: string): 
   let pulled = 0;
   const errors: string[] = [];
 
-  // Build map of existing SQLite tasks by claude_task_id
-  const filter: Record<string, unknown> = {};
-  if (projectId) filter["project_id"] = projectId;
-  const existingTasks = listTasks(filter as any);
+  // Search ALL tasks globally for matching — don't filter by project
+  // so we never create duplicates across projects
+  const allTasks = listTasks({});
   const byClaudeId = new Map<string, Task>();
-  for (const t of existingTasks) {
+  for (const t of allTasks) {
     const cid = t.metadata["claude_task_id"];
     if (cid) byClaudeId.set(String(cid), t);
   }
-  // Also build by todos_id for reverse lookup
   const byTodosId = new Map<string, Task>();
-  for (const t of existingTasks) {
+  for (const t of allTasks) {
     byTodosId.set(t.id, t);
   }
 
