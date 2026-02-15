@@ -7,3 +7,5 @@ dist/
 .env
 .DS_Store
 *.tgz
+*.png
+.playwright-mcp/
