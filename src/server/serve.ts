@@ -4,7 +4,8 @@
  * API endpoints call directly into src/db/ functions.
  */
 
-import { existsSync } from "fs";
+import { execSync } from "child_process";
+import { existsSync, readFileSync } from "fs";
 import { join, dirname, extname } from "path";
 import { fileURLToPath } from "url";
 import {
@@ -79,6 +80,15 @@ function json(data: unknown, status = 200, port?: number): Response {
       ...SECURITY_HEADERS,
     },
   });
+}
+
+function getPackageVersion(): string {
+  try {
+    const pkgPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "package.json");
+    return JSON.parse(readFileSync(pkgPath, "utf-8")).version || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
 }
 
 /** Max request body size (1MB) */
@@ -362,6 +372,45 @@ export async function startServer(port: number, options?: { open?: boolean }): P
           return json(results, 200, port);
         } catch (e) {
           return json({ error: e instanceof Error ? e.message : "Search failed" }, 500, port);
+        }
+      }
+
+      // GET /api/system/version
+      if (path === "/api/system/version" && method === "GET") {
+        try {
+          const current = getPackageVersion();
+          const npmRes = await fetch("https://registry.npmjs.org/@hasna/todos/latest");
+          if (!npmRes.ok) {
+            return json({ current, latest: current, updateAvailable: false }, 200, port);
+          }
+          const data = (await npmRes.json()) as { version: string };
+          const latest = data.version;
+          return json({ current, latest, updateAvailable: current !== latest }, 200, port);
+        } catch {
+          const current = getPackageVersion();
+          return json({ current, latest: current, updateAvailable: false }, 200, port);
+        }
+      }
+
+      // POST /api/system/update
+      if (path === "/api/system/update" && method === "POST") {
+        try {
+          let useBun = false;
+          try {
+            execSync("which bun", { stdio: "ignore" });
+            useBun = true;
+          } catch {
+            // bun not available
+          }
+
+          const cmd = useBun
+            ? "bun add -g @hasna/todos@latest"
+            : "npm install -g @hasna/todos@latest";
+
+          execSync(cmd, { stdio: "ignore", timeout: 60000 });
+          return json({ success: true, message: "Updated! Restart the server to use the new version." }, 200, port);
+        } catch (e) {
+          return json({ success: false, message: e instanceof Error ? e.message : "Update failed" }, 500, port);
         }
       }
 

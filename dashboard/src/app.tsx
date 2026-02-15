@@ -1,5 +1,5 @@
 import * as React from "react";
-import { RefreshCwIcon, PlusIcon } from "lucide-react";
+import { RefreshCwIcon, PlusIcon, ArrowUpCircleIcon } from "lucide-react";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { StatsCards } from "@/components/stats-cards";
 import { TasksTable } from "@/components/tasks-table";
@@ -19,6 +19,8 @@ export function App() {
     message: string;
     type: "success" | "error";
   } | null>(null);
+  const [updateAvailable, setUpdateAvailable] = React.useState(false);
+  const [updating, setUpdating] = React.useState(false);
 
   const loadTasks = React.useCallback(async () => {
     try {
@@ -46,6 +48,29 @@ export function App() {
     loadTasks();
     loadProjects();
   }, [loadTasks, loadProjects]);
+
+  React.useEffect(() => {
+    fetch("/api/system/version")
+      .then((res) => res.json())
+      .then((data: { updateAvailable?: boolean }) => {
+        if (data.updateAvailable) setUpdateAvailable(true);
+      })
+      .catch(() => {});
+  }, []);
+
+  async function handleUpdate() {
+    setUpdating(true);
+    try {
+      const res = await fetch("/api/system/update", { method: "POST" });
+      const data = (await res.json()) as { success: boolean; message: string };
+      showToast(data.message, data.success ? "success" : "error");
+      if (data.success) setUpdateAvailable(false);
+    } catch {
+      showToast("Update failed", "error");
+    } finally {
+      setUpdating(false);
+    }
+  }
 
   function showToast(message: string, type: "success" | "error") {
     setToast({ message, type });
@@ -170,6 +195,21 @@ export function App() {
                 className={`size-3.5 ${loading ? "animate-spin" : ""}`}
               />
               Reload
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleUpdate}
+              disabled={updating}
+              className="relative"
+            >
+              <ArrowUpCircleIcon
+                className={`size-3.5 ${updating ? "animate-spin" : ""}`}
+              />
+              Update
+              {updateAvailable && (
+                <span className="absolute -right-0.5 -top-0.5 size-2 rounded-full bg-blue-500" />
+              )}
             </Button>
             <ThemeToggle />
           </div>

@@ -4,6 +4,7 @@ import chalk from "chalk";
 import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { getDatabase, resolvePartialId } from "../db/database.js";
 import {
   createTask,
@@ -28,6 +29,15 @@ import { addComment } from "../db/comments.js";
 import { searchTasks } from "../lib/search.js";
 import type { Task, TaskStatus, TaskPriority } from "../types/index.js";
 
+function getPackageVersion(): string {
+  try {
+    const pkgPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "package.json");
+    return JSON.parse(readFileSync(pkgPath, "utf-8")).version || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
 const program = new Command();
 
 // Helpers
@@ -49,7 +59,7 @@ function resolveTaskId(partialId: string): string {
 
 function detectGitRoot(): string | null {
   try {
-    return execSync("git rev-parse --show-toplevel", { encoding: "utf-8" }).trim();
+    return execSync("git rev-parse --show-toplevel", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim();
   } catch {
     return null;
   }
@@ -103,7 +113,7 @@ function formatTaskLine(t: Task): string {
 program
   .name("todos")
   .description("Universal task management for AI coding agents")
-  .version("0.1.0")
+  .version(getPackageVersion())
   .option("--project <path>", "Project path")
   .option("--json", "Output as JSON")
   .option("--agent <name>", "Agent name")
@@ -865,6 +875,60 @@ program
   .action(async (opts) => {
     const { startServer } = await import("../server/serve.js");
     await startServer(parseInt(opts.port, 10), { open: opts.open });
+  });
+
+// upgrade (self-update)
+program
+  .command("upgrade")
+  .alias("self-update")
+  .description("Update todos to the latest version")
+  .option("--check", "Only check for updates, don't install")
+  .action(async (opts) => {
+    try {
+      const currentVersion = getPackageVersion();
+
+      const res = await fetch("https://registry.npmjs.org/@hasna/todos/latest");
+      if (!res.ok) {
+        console.error(chalk.red("Failed to check for updates."));
+        process.exit(1);
+      }
+      const data = (await res.json()) as { version: string };
+      const latestVersion = data.version;
+
+      console.log(`  Current: ${chalk.dim(currentVersion)}`);
+      console.log(`  Latest:  ${chalk.green(latestVersion)}`);
+
+      if (currentVersion === latestVersion) {
+        console.log(chalk.green("\nAlready up to date!"));
+        return;
+      }
+
+      if (opts.check) {
+        console.log(
+          chalk.yellow(`\nUpdate available: ${currentVersion} → ${latestVersion}`),
+        );
+        return;
+      }
+
+      // Detect package manager
+      let useBun = false;
+      try {
+        execSync("which bun", { stdio: "ignore" });
+        useBun = true;
+      } catch {
+        // bun not available, fall back to npm
+      }
+
+      const cmd = useBun
+        ? "bun add -g @hasna/todos@latest"
+        : "npm install -g @hasna/todos@latest";
+
+      console.log(chalk.dim(`\nRunning: ${cmd}`));
+      execSync(cmd, { stdio: "inherit" });
+      console.log(chalk.green(`\nUpdated to ${latestVersion}!`));
+    } catch (e) {
+      handleError(e);
+    }
   });
 
 // interactive (TUI)
