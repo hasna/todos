@@ -1,6 +1,6 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 import type { Task, TaskRow } from "../types/index.js";
-import { getDatabase } from "../db/database.js";
+import { clearExpiredLocks, getDatabase } from "../db/database.js";
 
 function rowToTask(row: TaskRow): Task {
   return {
@@ -18,9 +18,10 @@ export function searchTasks(
   db?: Database,
 ): Task[] {
   const d = db || getDatabase();
+  clearExpiredLocks(d);
   const pattern = `%${query}%`;
 
-  let sql = `SELECT * FROM tasks WHERE (title LIKE ? OR description LIKE ? OR tags LIKE ?)`;
+  let sql = `SELECT * FROM tasks WHERE (title LIKE ? OR description LIKE ? OR EXISTS (SELECT 1 FROM task_tags WHERE task_tags.task_id = tasks.id AND tag LIKE ?))`;
   const params: SQLQueryBindings[] = [pattern, pattern, pattern];
 
   if (projectId) {

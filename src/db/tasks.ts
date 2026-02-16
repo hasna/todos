@@ -15,7 +15,7 @@ import {
   TaskNotFoundError,
   VersionConflictError,
 } from "../types/index.js";
-import { getDatabase, isLockExpired, now, uuid } from "./database.js";
+import { clearExpiredLocks, getDatabase, isLockExpired, lockExpiryCutoff, now, uuid } from "./database.js";
 
 function rowToTask(row: TaskRow): Task {
   return {
@@ -27,18 +27,33 @@ function rowToTask(row: TaskRow): Task {
   };
 }
 
+function insertTaskTags(taskId: string, tags: string[], db: Database): void {
+  if (tags.length === 0) return;
+  const stmt = db.prepare("INSERT OR IGNORE INTO task_tags (task_id, tag) VALUES (?, ?)");
+  for (const tag of tags) {
+    if (tag) stmt.run(taskId, tag);
+  }
+}
+
+function replaceTaskTags(taskId: string, tags: string[], db: Database): void {
+  db.run("DELETE FROM task_tags WHERE task_id = ?", [taskId]);
+  insertTaskTags(taskId, tags, db);
+}
+
 export function createTask(input: CreateTaskInput, db?: Database): Task {
   const d = db || getDatabase();
   const id = uuid();
   const timestamp = now();
+  const tags = input.tags || [];
 
   d.run(
-    `INSERT INTO tasks (id, project_id, parent_id, title, description, status, priority, agent_id, assigned_to, session_id, working_dir, tags, metadata, version, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+    `INSERT INTO tasks (id, project_id, parent_id, plan_id, title, description, status, priority, agent_id, assigned_to, session_id, working_dir, tags, metadata, version, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
     [
       id,
       input.project_id || null,
       input.parent_id || null,
+      input.plan_id || null,
       input.title,
       input.description || null,
       input.status || "pending",
@@ -47,12 +62,16 @@ export function createTask(input: CreateTaskInput, db?: Database): Task {
       input.assigned_to || null,
       input.session_id || null,
       input.working_dir || null,
-      JSON.stringify(input.tags || []),
+      JSON.stringify(tags),
       JSON.stringify(input.metadata || {}),
       timestamp,
       timestamp,
     ],
   );
+
+  if (tags.length > 0) {
+    insertTaskTags(id, tags, d);
+  }
 
   return getTask(id, d)!;
 }
@@ -120,6 +139,7 @@ export function getTaskWithRelations(
 
 export function listTasks(filter: TaskFilter = {}, db?: Database): Task[] {
   const d = db || getDatabase();
+  clearExpiredLocks(d);
   const conditions: string[] = [];
   const params: SQLQueryBindings[] = [];
 
@@ -175,18 +195,27 @@ export function listTasks(filter: TaskFilter = {}, db?: Database): Task[] {
   }
 
   if (filter.tags && filter.tags.length > 0) {
-    // Match any of the given tags
-    const tagConditions = filter.tags.map(() => "tags LIKE ?");
-    conditions.push(`(${tagConditions.join(" OR ")})`);
-    params.push(...filter.tags.map((t) => `%"${t}"%`));
+    const placeholders = filter.tags.map(() => "?").join(",");
+    conditions.push(`id IN (SELECT task_id FROM task_tags WHERE tag IN (${placeholders}))`);
+    params.push(...filter.tags);
+  }
+
+  if (filter.plan_id) {
+    conditions.push("plan_id = ?");
+    params.push(filter.plan_id);
   }
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+  const limitVal = filter.limit || 100;
+  const offsetVal = filter.offset || 0;
+  params.push(limitVal, offsetVal);
+
   const rows = d
     .query(
       `SELECT * FROM tasks ${where} ORDER BY
        CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 END,
-       created_at DESC`,
+       created_at DESC LIMIT ? OFFSET ?`,
     )
     .all(...params) as TaskRow[];
 
@@ -242,6 +271,10 @@ export function updateTask(
     sets.push("metadata = ?");
     params.push(JSON.stringify(input.metadata));
   }
+  if (input.plan_id !== undefined) {
+    sets.push("plan_id = ?");
+    params.push(input.plan_id);
+  }
 
   params.push(id, input.version);
 
@@ -260,6 +293,10 @@ export function updateTask(
     );
   }
 
+  if (input.tags !== undefined) {
+    replaceTaskTags(id, input.tags, d);
+  }
+
   return getTask(id, d)!;
 }
 
@@ -275,20 +312,21 @@ export function startTask(
   db?: Database,
 ): Task {
   const d = db || getDatabase();
-  const task = getTask(id, d);
-  if (!task) throw new TaskNotFoundError(id);
-
-  // Check if locked by another agent
-  if (task.locked_by && task.locked_by !== agentId && !isLockExpired(task.locked_at)) {
-    throw new LockError(id, task.locked_by);
-  }
-
+  const cutoff = lockExpiryCutoff();
   const timestamp = now();
-  d.run(
+  const result = d.run(
     `UPDATE tasks SET status = 'in_progress', assigned_to = ?, locked_by = ?, locked_at = ?, version = version + 1, updated_at = ?
-     WHERE id = ?`,
-    [agentId, agentId, timestamp, timestamp, id],
+     WHERE id = ? AND (locked_by IS NULL OR locked_by = ? OR locked_at < ?)`,
+    [agentId, agentId, timestamp, timestamp, id, agentId, cutoff],
   );
+
+  if (result.changes === 0) {
+    const current = getTask(id, d);
+    if (!current) throw new TaskNotFoundError(id);
+    if (current.locked_by && current.locked_by !== agentId && !isLockExpired(current.locked_at)) {
+      throw new LockError(id, current.locked_by);
+    }
+  }
 
   return getTask(id, d)!;
 }
@@ -332,27 +370,31 @@ export function lockTask(
   if (!task) throw new TaskNotFoundError(id);
 
   // Already locked by same agent
-  if (task.locked_by === agentId) {
+  if (task.locked_by === agentId && !isLockExpired(task.locked_at)) {
     return { success: true, locked_by: agentId, locked_at: task.locked_at! };
   }
 
-  // Locked by another agent (and not expired)
-  if (task.locked_by && !isLockExpired(task.locked_at)) {
-    return {
-      success: false,
-      locked_by: task.locked_by,
-      locked_at: task.locked_at!,
-      error: `Task is locked by ${task.locked_by}`,
-    };
-  }
-
-  // Acquire lock
+  // Acquire lock (atomically if not locked or expired)
+  const cutoff = lockExpiryCutoff();
   const timestamp = now();
-  d.run(
+  const result = d.run(
     `UPDATE tasks SET locked_by = ?, locked_at = ?, version = version + 1, updated_at = ?
-     WHERE id = ?`,
-    [agentId, timestamp, timestamp, id],
+     WHERE id = ? AND (locked_by IS NULL OR locked_by = ? OR locked_at < ?)`,
+    [agentId, timestamp, timestamp, id, agentId, cutoff],
   );
+
+  if (result.changes === 0) {
+    const current = getTask(id, d);
+    if (!current) throw new TaskNotFoundError(id);
+    if (current.locked_by && !isLockExpired(current.locked_at)) {
+      return {
+        success: false,
+        locked_by: current.locked_by,
+        locked_at: current.locked_at!,
+        error: `Task is locked by ${current.locked_by}`,
+      };
+    }
+  }
 
   return { success: true, locked_by: agentId, locked_at: timestamp };
 }

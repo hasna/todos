@@ -1,8 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { listTasks, getTask, createTask, updateTask } from "../db/tasks.js";
-import type { Task, TaskStatus } from "../types/index.js";
-import type { SyncPrefer, SyncResult } from "./sync-types.js";
+import type { Task, TaskPriority, TaskStatus } from "../types/index.js";
 import {
   HOME,
   appendSyncConflict,
@@ -15,93 +14,90 @@ import {
   writeHighWaterMark,
   writeJsonFile,
 } from "./sync-utils.js";
+import { getAgentTasksDir } from "./config.js";
+import type { SyncPrefer, SyncResult } from "./sync-types.js";
 
-interface ClaudeTask {
+interface AgentTask {
   id: string;
-  subject: string;
+  title: string;
   description: string;
-  activeForm: string;
-  status: "pending" | "in_progress" | "completed";
-  owner: string;
-  blocks: string[];
-  blockedBy: string[];
+  status: TaskStatus;
+  priority: TaskPriority;
+  assigned_to: string;
+  tags: string[];
   metadata: Record<string, unknown>;
 }
 
-function getTaskListDir(taskListId: string): string {
-  return join(HOME, ".claude", "tasks", taskListId);
+function agentBaseDir(agent: string): string {
+  const key = `TODOS_${agent.toUpperCase()}_TASKS_DIR`;
+  return process.env[key]
+    || getAgentTasksDir(agent)
+    || process.env["TODOS_AGENT_TASKS_DIR"]
+    || join(HOME, ".todos", "agents");
 }
 
-function readClaudeTask(dir: string, filename: string): ClaudeTask | null {
-  return readJsonFile<ClaudeTask>(join(dir, filename));
+function getTaskListDir(agent: string, taskListId: string): string {
+  return join(agentBaseDir(agent), agent, taskListId);
 }
 
-function writeClaudeTask(dir: string, task: ClaudeTask): void {
+function readAgentTask(dir: string, filename: string): AgentTask | null {
+  return readJsonFile<AgentTask>(join(dir, filename));
+}
+
+function writeAgentTask(dir: string, task: AgentTask): void {
   writeJsonFile(join(dir, `${task.id}.json`), task);
 }
 
-function toClaudeStatus(status: TaskStatus): ClaudeTask["status"] {
-  if (status === "pending" || status === "in_progress" || status === "completed") {
-    return status;
-  }
-  // failed and cancelled map to completed
-  return "completed";
-}
-
-function toSqliteStatus(status: ClaudeTask["status"]): TaskStatus {
-  return status;
-}
-
-function taskToClaudeTask(task: Task, claudeTaskId: string, existingMeta?: Record<string, unknown>): ClaudeTask {
+function taskToAgentTask(task: Task, externalId: string, existingMeta?: Record<string, unknown>): AgentTask {
   return {
-    id: claudeTaskId,
-    subject: task.title,
+    id: externalId,
+    title: task.title,
     description: task.description || "",
-    activeForm: "",
-    status: toClaudeStatus(task.status),
-    owner: task.assigned_to || task.agent_id || "",
-    blocks: [],
-    blockedBy: [],
+    status: task.status,
+    priority: task.priority,
+    assigned_to: task.assigned_to || task.agent_id || "",
+    tags: task.tags || [],
     metadata: {
       ...(existingMeta || {}),
+      ...task.metadata,
       todos_id: task.id,
-      priority: task.priority,
       todos_updated_at: task.updated_at,
       todos_version: task.version,
     },
   };
 }
 
+function metadataKey(agent: string): string {
+  return `${agent}_task_id`;
+}
 
-/**
- * Push all SQLite tasks to a Claude Code task list directory.
- */
-export function pushToClaudeTaskList(
+export function pushToAgentTaskList(
+  agent: string,
   taskListId: string,
   projectId?: string,
   options: { prefer?: SyncPrefer } = {},
 ): SyncResult {
-  const dir = getTaskListDir(taskListId);
+  const dir = getTaskListDir(agent, taskListId);
   if (!existsSync(dir)) ensureDir(dir);
 
   const filter: Record<string, unknown> = {};
   if (projectId) filter["project_id"] = projectId;
   const tasks = listTasks(filter as any);
 
-  // Build map of existing Claude tasks by todos_id
-  const existingByTodosId = new Map<string, { task: ClaudeTask; mtimeMs: number | null }>();
+  const existingByTodosId = new Map<string, { task: AgentTask; mtimeMs: number | null }>();
   const files = listJsonFiles(dir);
   for (const f of files) {
     const path = join(dir, f);
-    const ct = readClaudeTask(dir, f);
-    if (ct?.metadata?.["todos_id"]) {
-      existingByTodosId.set(ct.metadata["todos_id"] as string, { task: ct, mtimeMs: getFileMtimeMs(path) });
+    const at = readAgentTask(dir, f);
+    if (at?.metadata?.["todos_id"]) {
+      existingByTodosId.set(at.metadata["todos_id"] as string, { task: at, mtimeMs: getFileMtimeMs(path) });
     }
   }
 
   let hwm = readHighWaterMark(dir);
   let pushed = 0;
   const errors: string[] = [];
+  const metaKey = metadataKey(agent);
   const prefer = options.prefer || "remote";
 
   for (const task of tasks) {
@@ -115,7 +111,7 @@ export function pushToClaudeTaskList(
         if (lastSyncedAt && localUpdatedAt && remoteUpdatedAt && localUpdatedAt > lastSyncedAt && remoteUpdatedAt > lastSyncedAt) {
           if (prefer === "remote") {
             const conflict = {
-              agent: "claude",
+              agent,
               direction: "push" as const,
               prefer,
               local_updated_at: task.updated_at,
@@ -130,17 +126,13 @@ export function pushToClaudeTaskList(
           recordConflict = true;
         }
 
-        // Update existing Claude task
-        const updated = taskToClaudeTask(task, existing.task.id, existing.task.metadata);
-        updated.blocks = existing.task.blocks;
-        updated.blockedBy = existing.task.blockedBy;
-        updated.activeForm = existing.task.activeForm;
-        writeClaudeTask(dir, updated);
+        const updated = taskToAgentTask(task, existing.task.id, existing.task.metadata);
+        writeAgentTask(dir, updated);
         if (recordConflict) {
           const latest = getTask(task.id);
           if (latest) {
             const conflict = {
-              agent: "claude",
+              agent,
               direction: "push" as const,
               prefer,
               local_updated_at: latest.updated_at,
@@ -152,16 +144,14 @@ export function pushToClaudeTaskList(
           }
         }
       } else {
-        // Create new Claude task
-        const claudeId = String(hwm);
+        const externalId = String(hwm);
         hwm++;
-        const ct = taskToClaudeTask(task, claudeId);
-        writeClaudeTask(dir, ct);
+        const at = taskToAgentTask(task, externalId);
+        writeAgentTask(dir, at);
 
-        // Store the mapping in SQLite metadata
         const current = getTask(task.id);
         if (current) {
-          const newMeta = { ...current.metadata, claude_task_id: claudeId };
+          const newMeta = { ...current.metadata, [metaKey]: externalId };
           updateTask(task.id, { version: current.version, metadata: newMeta });
         }
       }
@@ -175,59 +165,52 @@ export function pushToClaudeTaskList(
   return { pushed, pulled: 0, errors };
 }
 
-/**
- * Pull tasks from a Claude Code task list into SQLite.
- */
-export function pullFromClaudeTaskList(
+export function pullFromAgentTaskList(
+  agent: string,
   taskListId: string,
   projectId?: string,
   options: { prefer?: SyncPrefer } = {},
 ): SyncResult {
-  const dir = getTaskListDir(taskListId);
+  const dir = getTaskListDir(agent, taskListId);
   if (!existsSync(dir)) {
     return { pushed: 0, pulled: 0, errors: [`Task list directory not found: ${dir}`] };
   }
 
-  const files = readdirSync(dir).filter((f) => f.endsWith(".json"));
+  const files = listJsonFiles(dir);
   let pulled = 0;
   const errors: string[] = [];
+  const metaKey = metadataKey(agent);
   const prefer = options.prefer || "remote";
 
-  // Search ALL tasks globally for matching — don't filter by project
-  // so we never create duplicates across projects
   const allTasks = listTasks({});
-  const byClaudeId = new Map<string, Task>();
-  for (const t of allTasks) {
-    const cid = t.metadata["claude_task_id"];
-    if (cid) byClaudeId.set(String(cid), t);
-  }
+  const byExternalId = new Map<string, Task>();
   const byTodosId = new Map<string, Task>();
   for (const t of allTasks) {
+    const extId = t.metadata[metaKey];
+    if (extId) byExternalId.set(String(extId), t);
     byTodosId.set(t.id, t);
   }
 
   for (const f of files) {
     try {
       const filePath = join(dir, f);
-      const ct = readClaudeTask(dir, f);
-      if (!ct) continue;
+      const at = readAgentTask(dir, f);
+      if (!at) continue;
+      if (at.metadata?.["_internal"]) continue;
 
-      // Skip internal tasks
-      if (ct.metadata?.["_internal"]) continue;
-
-      const todosId = ct.metadata?.["todos_id"] as string | undefined;
-      const existingByMapping = byClaudeId.get(ct.id);
+      const todosId = at.metadata?.["todos_id"] as string | undefined;
+      const existingByMapping = byExternalId.get(at.id);
       const existingByTodos = todosId ? byTodosId.get(todosId) : undefined;
       const existing = existingByMapping || existingByTodos;
 
       if (existing) {
-        const lastSyncedAt = parseTimestamp(ct.metadata?.["todos_updated_at"]);
+        const lastSyncedAt = parseTimestamp(at.metadata?.["todos_updated_at"]);
         const localUpdatedAt = parseTimestamp(existing.updated_at);
         const remoteUpdatedAt = getFileMtimeMs(filePath);
         let conflictMeta: Record<string, unknown> | null = null;
         if (lastSyncedAt && localUpdatedAt && remoteUpdatedAt && localUpdatedAt > lastSyncedAt && remoteUpdatedAt > lastSyncedAt) {
           const conflict = {
-            agent: "claude",
+            agent,
             direction: "pull" as const,
             prefer,
             local_updated_at: existing.updated_at,
@@ -242,25 +225,26 @@ export function pullFromClaudeTaskList(
           }
         }
 
-        // Update existing SQLite task
         updateTask(existing.id, {
           version: existing.version,
-          title: ct.subject,
-          description: ct.description || undefined,
-          status: toSqliteStatus(ct.status),
-          assigned_to: ct.owner || undefined,
-          metadata: { ...(conflictMeta || existing.metadata), claude_task_id: ct.id, ...ct.metadata },
+          title: at.title,
+          description: at.description || undefined,
+          status: at.status,
+          priority: at.priority,
+          assigned_to: at.assigned_to || undefined,
+          tags: at.tags || [],
+          metadata: { ...(conflictMeta || existing.metadata), ...at.metadata, [metaKey]: at.id },
         });
       } else {
-        // Create new SQLite task
         createTask({
-          title: ct.subject,
-          description: ct.description || undefined,
-          status: toSqliteStatus(ct.status),
-          assigned_to: ct.owner || undefined,
+          title: at.title,
+          description: at.description || undefined,
+          status: at.status,
+          priority: at.priority || "medium",
+          assigned_to: at.assigned_to || undefined,
+          tags: at.tags || [],
           project_id: projectId,
-          metadata: { ...ct.metadata, claude_task_id: ct.id },
-          priority: (ct.metadata?.["priority"] as any) || "medium",
+          metadata: { ...at.metadata, [metaKey]: at.id },
         });
       }
       pulled++;
@@ -272,16 +256,14 @@ export function pullFromClaudeTaskList(
   return { pushed: 0, pulled, errors };
 }
 
-/**
- * Bidirectional sync: pull first, then push.
- */
-export function syncClaudeTaskList(
+export function syncAgentTaskList(
+  agent: string,
   taskListId: string,
   projectId?: string,
   options: { prefer?: SyncPrefer } = {},
 ): SyncResult {
-  const pullResult = pullFromClaudeTaskList(taskListId, projectId, options);
-  const pushResult = pushToClaudeTaskList(taskListId, projectId, options);
+  const pullResult = pullFromAgentTaskList(agent, taskListId, projectId, options);
+  const pushResult = pushToAgentTaskList(agent, taskListId, projectId, options);
   return {
     pushed: pushResult.pushed,
     pulled: pullResult.pulled,

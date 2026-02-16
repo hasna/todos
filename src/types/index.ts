@@ -17,12 +17,17 @@ export const TASK_PRIORITIES = [
 ] as const;
 export type TaskPriority = (typeof TASK_PRIORITIES)[number];
 
+// Plan statuses
+export const PLAN_STATUSES = ["active", "completed", "archived"] as const;
+export type PlanStatus = (typeof PLAN_STATUSES)[number];
+
 // Project
 export interface Project {
   id: string;
   name: string;
   path: string;
   description: string | null;
+  task_list_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -31,6 +36,31 @@ export interface CreateProjectInput {
   name: string;
   path: string;
   description?: string;
+  task_list_id?: string;
+}
+
+// Plan
+export interface Plan {
+  id: string;
+  project_id: string | null;
+  name: string;
+  description: string | null;
+  status: PlanStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreatePlanInput {
+  name: string;
+  project_id?: string;
+  description?: string;
+  status?: PlanStatus;
+}
+
+export interface UpdatePlanInput {
+  name?: string;
+  description?: string;
+  status?: PlanStatus;
 }
 
 // Task
@@ -38,6 +68,7 @@ export interface Task {
   id: string;
   project_id: string | null;
   parent_id: string | null;
+  plan_id: string | null;
   title: string;
   description: string | null;
   status: TaskStatus;
@@ -70,6 +101,7 @@ export interface CreateTaskInput {
   description?: string;
   project_id?: string;
   parent_id?: string;
+  plan_id?: string;
   status?: TaskStatus;
   priority?: TaskPriority;
   agent_id?: string;
@@ -86,6 +118,7 @@ export interface UpdateTaskInput {
   status?: TaskStatus;
   priority?: TaskPriority;
   assigned_to?: string;
+  plan_id?: string;
   tags?: string[];
   metadata?: Record<string, unknown>;
   version: number; // required for optimistic locking
@@ -94,6 +127,7 @@ export interface UpdateTaskInput {
 export interface TaskFilter {
   project_id?: string;
   parent_id?: string | null;
+  plan_id?: string;
   status?: TaskStatus | TaskStatus[];
   priority?: TaskPriority | TaskPriority[];
   assigned_to?: string;
@@ -101,6 +135,8 @@ export interface TaskFilter {
   session_id?: string;
   tags?: string[];
   include_subtasks?: boolean;
+  limit?: number;
+  offset?: number;
 }
 
 // Task dependency
@@ -144,11 +180,31 @@ export interface CreateSessionInput {
   metadata?: Record<string, unknown>;
 }
 
+// API Key
+export interface ApiKey {
+  id: string;
+  name: string;
+  key_prefix: string;
+  created_at: string;
+  last_used_at: string | null;
+  expires_at: string | null;
+}
+
+export interface ApiKeyWithSecret extends ApiKey {
+  key: string; // full key, only returned on creation
+}
+
+export interface CreateApiKeyInput {
+  name: string;
+  expires_at?: string;
+}
+
 // DB row types (raw from SQLite - JSON fields are strings)
 export interface TaskRow {
   id: string;
   project_id: string | null;
   parent_id: string | null;
+  plan_id: string | null;
   title: string;
   description: string | null;
   status: string;
@@ -210,6 +266,13 @@ export class ProjectNotFoundError extends Error {
   constructor(public projectId: string) {
     super(`Project not found: ${projectId}`);
     this.name = "ProjectNotFoundError";
+  }
+}
+
+export class PlanNotFoundError extends Error {
+  constructor(public planId: string) {
+    super(`Plan not found: ${planId}`);
+    this.name = "PlanNotFoundError";
   }
 }
 

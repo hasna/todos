@@ -2,7 +2,34 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
-const LOCK_EXPIRY_MINUTES = 30;
+export const LOCK_EXPIRY_MINUTES = 30;
+
+function isInMemoryDb(path: string): boolean {
+  return path === ":memory:" || path.startsWith("file::memory:");
+}
+
+function findNearestTodosDb(startDir: string): string | null {
+  let dir = resolve(startDir);
+  while (true) {
+    const candidate = join(dir, ".todos", "todos.db");
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+function findGitRoot(startDir: string): string | null {
+  let dir = resolve(startDir);
+  while (true) {
+    if (existsSync(join(dir, ".git"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
 
 function getDbPath(): string {
   // 1. Environment variable override
@@ -10,19 +37,26 @@ function getDbPath(): string {
     return process.env["TODOS_DB_PATH"];
   }
 
-  // 2. Per-project: .todos/todos.db in cwd or git root
+  // 2. Per-project: .todos/todos.db in cwd or any parent (incl. repo root)
   const cwd = process.cwd();
-  const localDb = join(cwd, ".todos", "todos.db");
-  if (existsSync(localDb)) {
-    return localDb;
+  const nearest = findNearestTodosDb(cwd);
+  if (nearest) return nearest;
+
+  // 3. Explicit project scope (force repo root)
+  if (process.env["TODOS_DB_SCOPE"] === "project") {
+    const gitRoot = findGitRoot(cwd);
+    if (gitRoot) {
+      return join(gitRoot, ".todos", "todos.db");
+    }
   }
 
-  // 3. Default: ~/.todos/todos.db
+  // 4. Default: ~/.todos/todos.db
   const home = process.env["HOME"] || process.env["USERPROFILE"] || "~";
   return join(home, ".todos", "todos.db");
 }
 
 function ensureDir(filePath: string): void {
+  if (isInMemoryDb(filePath)) return;
   const dir = dirname(resolve(filePath));
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
@@ -107,6 +141,113 @@ const MIGRATIONS = [
 
   INSERT OR IGNORE INTO _migrations (id) VALUES (1);
   `,
+  // Migration 2: Add task_list_id to projects
+  `
+  ALTER TABLE projects ADD COLUMN task_list_id TEXT;
+  INSERT OR IGNORE INTO _migrations (id) VALUES (2);
+  `,
+  // Migration 3: Task tags join table for exact tag filtering
+  `
+  CREATE TABLE IF NOT EXISTS task_tags (
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    tag TEXT NOT NULL,
+    PRIMARY KEY (task_id, tag)
+  );
+  CREATE INDEX IF NOT EXISTS idx_task_tags_tag ON task_tags(tag);
+  CREATE INDEX IF NOT EXISTS idx_task_tags_task ON task_tags(task_id);
+
+  INSERT OR IGNORE INTO _migrations (id) VALUES (3);
+  `,
+  // Migration 4: Plans table and plan_id on tasks
+  `
+  CREATE TABLE IF NOT EXISTS plans (
+    id TEXT PRIMARY KEY,
+    project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'completed', 'archived')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_plans_project ON plans(project_id);
+  CREATE INDEX IF NOT EXISTS idx_plans_status ON plans(status);
+  ALTER TABLE tasks ADD COLUMN plan_id TEXT REFERENCES plans(id) ON DELETE SET NULL;
+  CREATE INDEX IF NOT EXISTS idx_tasks_plan ON tasks(plan_id);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (4);
+  `,
+  // Migration 5: API keys table
+  `
+  CREATE TABLE IF NOT EXISTS api_keys (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    key_hash TEXT NOT NULL UNIQUE,
+    key_prefix TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_used_at TEXT,
+    expires_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (5);
+  `,
+  // Migration 6: Audit log, webhooks, and rate limits
+  `
+  CREATE TABLE IF NOT EXISTS audit_log (
+    id TEXT PRIMARY KEY,
+    entity_type TEXT NOT NULL CHECK(entity_type IN ('task', 'plan', 'project', 'api_key', 'comment')),
+    entity_id TEXT NOT NULL,
+    action TEXT NOT NULL CHECK(action IN ('create', 'update', 'delete', 'start', 'complete', 'lock', 'unlock')),
+    actor TEXT,
+    changes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_type, entity_id);
+  CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
+
+  CREATE TABLE IF NOT EXISTS webhooks (
+    id TEXT PRIMARY KEY,
+    url TEXT NOT NULL,
+    events TEXT NOT NULL DEFAULT '[]',
+    secret TEXT,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS rate_limits (
+    key TEXT PRIMARY KEY,
+    count INTEGER NOT NULL DEFAULT 0,
+    window_start TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  INSERT OR IGNORE INTO _migrations (id) VALUES (6);
+  `,
+  // Migration 7: Billing customers and usage records
+  `
+  CREATE TABLE IF NOT EXISTS billing_customers (
+    id TEXT PRIMARY KEY,
+    stripe_customer_id TEXT UNIQUE,
+    email TEXT,
+    name TEXT,
+    plan TEXT NOT NULL DEFAULT 'free' CHECK(plan IN ('free', 'pro', 'team', 'enterprise')),
+    stripe_subscription_id TEXT,
+    subscription_status TEXT DEFAULT 'active' CHECK(subscription_status IN ('active', 'past_due', 'canceled', 'trialing', 'incomplete')),
+    current_period_end TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_billing_stripe ON billing_customers(stripe_customer_id);
+
+  CREATE TABLE IF NOT EXISTS usage_records (
+    id TEXT PRIMARY KEY,
+    customer_id TEXT REFERENCES billing_customers(id),
+    metric TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    period TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_usage_customer ON usage_records(customer_id, period);
+
+  INSERT OR IGNORE INTO _migrations (id) VALUES (7);
+  `,
 ];
 
 let _db: Database | null = null;
@@ -126,6 +267,7 @@ export function getDatabase(dbPath?: string): Database {
 
   // Run migrations
   runMigrations(_db);
+  backfillTaskTags(_db);
 
   return _db;
 }
@@ -144,6 +286,36 @@ function runMigrations(db: Database): void {
     for (const migration of MIGRATIONS) {
       db.exec(migration);
     }
+  }
+}
+
+function backfillTaskTags(db: Database): void {
+  try {
+    const count = db.query("SELECT COUNT(*) as count FROM task_tags").get() as { count: number } | null;
+    if (count && count.count > 0) return;
+  } catch {
+    return;
+  }
+
+  try {
+    const rows = db.query("SELECT id, tags FROM tasks WHERE tags IS NOT NULL AND tags != '[]'").all() as { id: string; tags: string | null }[];
+    if (rows.length === 0) return;
+
+    const insert = db.prepare("INSERT OR IGNORE INTO task_tags (task_id, tag) VALUES (?, ?)");
+    for (const row of rows) {
+      if (!row.tags) continue;
+      let tags: string[] = [];
+      try {
+        tags = JSON.parse(row.tags) as string[];
+      } catch {
+        continue;
+      }
+      for (const tag of tags) {
+        if (tag) insert.run(row.id, tag);
+      }
+    }
+  } catch {
+    // Best-effort backfill only
   }
 }
 
@@ -171,6 +343,16 @@ export function isLockExpired(lockedAt: string | null): boolean {
   const lockTime = new Date(lockedAt).getTime();
   const expiryMs = LOCK_EXPIRY_MINUTES * 60 * 1000;
   return Date.now() - lockTime > expiryMs;
+}
+
+export function lockExpiryCutoff(nowMs = Date.now()): string {
+  const expiryMs = LOCK_EXPIRY_MINUTES * 60 * 1000;
+  return new Date(nowMs - expiryMs).toISOString();
+}
+
+export function clearExpiredLocks(db: Database): void {
+  const cutoff = lockExpiryCutoff();
+  db.run("UPDATE tasks SET locked_by = NULL, locked_at = NULL WHERE locked_at IS NOT NULL AND locked_at < ?", [cutoff]);
 }
 
 export function resolvePartialId(db: Database, table: string, partialId: string): string | null {

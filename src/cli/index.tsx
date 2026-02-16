@@ -21,14 +21,24 @@ import {
   removeDependency,
 } from "../db/tasks.js";
 import {
+  createProject,
   listProjects,
+  updateProject,
   ensureProject,
   getProjectByPath,
 } from "../db/projects.js";
+import {
+  createPlan,
+  getPlan,
+  listPlans,
+  updatePlan,
+  deletePlan,
+} from "../db/plans.js";
 import { addComment } from "../db/comments.js";
 import { searchTasks } from "../lib/search.js";
-import { pushToClaudeTaskList, pullFromClaudeTaskList, syncClaudeTaskList } from "../lib/claude-tasks.js";
-import type { Task, TaskStatus, TaskPriority } from "../types/index.js";
+import { defaultSyncAgents, syncWithAgent, syncWithAgents } from "../lib/sync.js";
+import { getAgentTaskListId } from "../lib/config.js";
+import type { Project, Task, TaskStatus, TaskPriority } from "../types/index.js";
 
 function getPackageVersion(): string {
   try {
@@ -66,18 +76,20 @@ function detectGitRoot(): string | null {
   }
 }
 
-function autoProject(opts: { project?: string }): string | undefined {
+function autoDetectProject(opts: { project?: string }): Project | undefined {
   if (opts.project) {
-    const p = getProjectByPath(resolve(opts.project));
-    return p?.id;
+    return getProjectByPath(resolve(opts.project)) ?? undefined;
   }
   if (process.env["TODOS_AUTO_PROJECT"] === "false") return undefined;
   const gitRoot = detectGitRoot();
   if (gitRoot) {
-    const p = ensureProject(basename(gitRoot), gitRoot);
-    return p.id;
+    return ensureProject(basename(gitRoot), gitRoot);
   }
   return undefined;
+}
+
+function autoProject(opts: { project?: string }): string | undefined {
+  return autoDetectProject(opts)?.id;
 }
 
 function output(data: unknown, jsonMode: boolean): void {
@@ -107,7 +119,8 @@ function formatTaskLine(t: Task): string {
   const lock = t.locked_by ? chalk.magenta(` [locked:${t.locked_by}]`) : "";
   const assigned = t.assigned_to ? chalk.cyan(` -> ${t.assigned_to}`) : "";
   const tags = t.tags.length > 0 ? chalk.dim(` [${t.tags.join(",")}]`) : "";
-  return `${chalk.dim(t.id.slice(0, 8))} ${statusFn(t.status.padEnd(11))} ${priorityFn(t.priority.padEnd(8))} ${t.title}${assigned}${lock}${tags}`;
+  const plan = t.plan_id ? chalk.magenta(` [plan:${t.plan_id.slice(0, 8)}]`) : "";
+  return `${chalk.dim(t.id.slice(0, 8))} ${statusFn(t.status.padEnd(11))} ${priorityFn(t.priority.padEnd(8))} ${t.title}${assigned}${lock}${tags}${plan}`;
 }
 
 // Global options
@@ -130,6 +143,7 @@ program
   .option("-p, --priority <level>", "Priority: low, medium, high, critical")
   .option("--parent <id>", "Parent task ID")
   .option("--tags <tags>", "Comma-separated tags")
+  .option("--plan <id>", "Assign to a plan")
   .option("--assign <agent>", "Assign to agent")
   .option("--status <status>", "Initial status")
   .action((title: string, opts) => {
@@ -141,6 +155,15 @@ program
       priority: opts.priority as TaskPriority | undefined,
       parent_id: opts.parent ? resolveTaskId(opts.parent) : undefined,
       tags: opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : undefined,
+      plan_id: opts.plan ? (() => {
+        const db = getDatabase();
+        const id = resolvePartialId(db, "plans", opts.plan);
+        if (!id) {
+          console.error(chalk.red(`Could not resolve plan ID: ${opts.plan}`));
+          process.exit(1);
+        }
+        return id;
+      })() : undefined,
       assigned_to: opts.assign,
       status: opts.status as TaskStatus | undefined,
       agent_id: globalOpts.agent,
@@ -231,6 +254,7 @@ program
     if (task.session_id) console.log(`  ${chalk.dim("Session:")}  ${task.session_id}`);
     if (task.locked_by) console.log(`  ${chalk.dim("Locked:")}   ${task.locked_by} (at ${task.locked_at})`);
     if (task.project_id) console.log(`  ${chalk.dim("Project:")}  ${task.project_id}`);
+    if (task.plan_id) console.log(`  ${chalk.dim("Plan:")}     ${task.plan_id}`);
     if (task.working_dir) console.log(`  ${chalk.dim("WorkDir:")}  ${task.working_dir}`);
     if (task.parent) console.log(`  ${chalk.dim("Parent:")}   ${task.parent.id.slice(0, 8)} | ${task.parent.title}`);
     if (task.tags.length > 0) console.log(`  ${chalk.dim("Tags:")}     ${task.tags.join(", ")}`);
@@ -419,56 +443,130 @@ program
     }
   });
 
-// plan
+// plans
 program
-  .command("plan <title>")
-  .description("Create a plan with subtasks")
-  .option("-d, --description <text>", "Plan description")
-  .option("--tasks <tasks>", "Comma-separated subtask titles")
-  .option("-p, --priority <priority>", "Priority")
-  .action((title: string, opts) => {
+  .command("plans")
+  .description("List and manage plans")
+  .option("--add <name>", "Create a plan")
+  .option("-d, --description <text>", "Plan description (with --add)")
+  .option("--show <id>", "Show plan details with its tasks")
+  .option("--delete <id>", "Delete a plan")
+  .option("--complete <id>", "Mark a plan as completed")
+  .action((opts) => {
     const globalOpts = program.opts();
     const projectId = autoProject(globalOpts);
 
-    const parent = createTask({
-      title,
-      description: opts.description,
-      priority: opts.priority as TaskPriority | undefined,
-      agent_id: globalOpts.agent,
-      session_id: globalOpts.session,
-      project_id: projectId,
-      working_dir: process.cwd(),
-    });
+    if (opts.add) {
+      const plan = createPlan({
+        name: opts.add,
+        description: opts.description,
+        project_id: projectId,
+      });
 
-    const subtasks: Task[] = [];
-    if (opts.tasks) {
-      const taskTitles = opts.tasks.split(",").map((t: string) => t.trim());
-      for (const st of taskTitles) {
-        subtasks.push(
-          createTask({
-            title: st,
-            parent_id: parent.id,
-            priority: opts.priority as TaskPriority | undefined,
-            agent_id: globalOpts.agent,
-            session_id: globalOpts.session,
-            project_id: projectId,
-            working_dir: process.cwd(),
-          }),
-        );
+      if (globalOpts.json) {
+        output(plan, true);
+      } else {
+        console.log(chalk.green("Plan created:"));
+        console.log(`${chalk.dim(plan.id.slice(0, 8))} ${chalk.bold(plan.name)} ${chalk.cyan(`[${plan.status}]`)}`);
       }
+      return;
     }
 
-    if (globalOpts.json) {
-      output({ parent, subtasks }, true);
-    } else {
-      console.log(chalk.green("Plan created:"));
-      console.log(formatTaskLine(parent));
-      if (subtasks.length > 0) {
-        console.log(chalk.bold(`\n  Subtasks:`));
-        for (const st of subtasks) {
-          console.log(`  ${formatTaskLine(st)}`);
-        }
+    if (opts.show) {
+      const db = getDatabase();
+      const resolvedId = resolvePartialId(db, "plans", opts.show);
+      if (!resolvedId) {
+        console.error(chalk.red(`Could not resolve plan ID: ${opts.show}`));
+        process.exit(1);
       }
+      const plan = getPlan(resolvedId);
+      if (!plan) {
+        console.error(chalk.red(`Plan not found: ${opts.show}`));
+        process.exit(1);
+      }
+      const tasks = listTasks({ plan_id: resolvedId });
+
+      if (globalOpts.json) {
+        output({ plan, tasks }, true);
+        return;
+      }
+
+      console.log(chalk.bold("Plan Details:\n"));
+      console.log(`  ${chalk.dim("ID:")}       ${plan.id}`);
+      console.log(`  ${chalk.dim("Name:")}     ${plan.name}`);
+      console.log(`  ${chalk.dim("Status:")}   ${chalk.cyan(plan.status)}`);
+      if (plan.description) console.log(`  ${chalk.dim("Desc:")}     ${plan.description}`);
+      if (plan.project_id) console.log(`  ${chalk.dim("Project:")}  ${plan.project_id}`);
+      console.log(`  ${chalk.dim("Created:")}  ${plan.created_at}`);
+
+      if (tasks.length > 0) {
+        console.log(chalk.bold(`\n  Tasks (${tasks.length}):`));
+        for (const t of tasks) {
+          console.log(`    ${formatTaskLine(t)}`);
+        }
+      } else {
+        console.log(chalk.dim("\n  No tasks in this plan."));
+      }
+      return;
+    }
+
+    if (opts.delete) {
+      const db = getDatabase();
+      const resolvedId = resolvePartialId(db, "plans", opts.delete);
+      if (!resolvedId) {
+        console.error(chalk.red(`Could not resolve plan ID: ${opts.delete}`));
+        process.exit(1);
+      }
+      const deleted = deletePlan(resolvedId);
+      if (globalOpts.json) {
+        output({ deleted }, true);
+      } else if (deleted) {
+        console.log(chalk.green("Plan deleted."));
+      } else {
+        console.error(chalk.red("Plan not found."));
+        process.exit(1);
+      }
+      return;
+    }
+
+    if (opts.complete) {
+      const db = getDatabase();
+      const resolvedId = resolvePartialId(db, "plans", opts.complete);
+      if (!resolvedId) {
+        console.error(chalk.red(`Could not resolve plan ID: ${opts.complete}`));
+        process.exit(1);
+      }
+      try {
+        const plan = updatePlan(resolvedId, { status: "completed" });
+        if (globalOpts.json) {
+          output(plan, true);
+        } else {
+          console.log(chalk.green("Plan completed:"));
+          console.log(`${chalk.dim(plan.id.slice(0, 8))} ${chalk.bold(plan.name)} ${chalk.cyan(`[${plan.status}]`)}`);
+        }
+      } catch (e) {
+        handleError(e);
+      }
+      return;
+    }
+
+    // Default: list plans
+    const plans = listPlans(projectId);
+
+    if (globalOpts.json) {
+      output(plans, true);
+      return;
+    }
+
+    if (plans.length === 0) {
+      console.log(chalk.dim("No plans found."));
+      return;
+    }
+
+    console.log(chalk.bold(`${plans.length} plan(s):\n`));
+    for (const p of plans) {
+      const desc = p.description ? chalk.dim(` - ${p.description}`) : "";
+      console.log(`${chalk.dim(p.id.slice(0, 8))} ${chalk.bold(p.name)} ${chalk.cyan(`[${p.status}]`)}${desc}`);
     }
   });
 
@@ -586,18 +684,29 @@ program
   .description("List and manage projects")
   .option("--add <path>", "Register a project by path")
   .option("--name <name>", "Project name (with --add)")
+  .option("--task-list-id <id>", "Custom task list ID (with --add)")
   .action((opts) => {
     const globalOpts = program.opts();
 
     if (opts.add) {
       const projectPath = resolve(opts.add);
       const name = opts.name || basename(projectPath);
-      const project = ensureProject(name, projectPath);
+      const existing = getProjectByPath(projectPath);
+      let project;
+      if (existing) {
+        project = existing;
+        if (opts.taskListId) {
+          project = updateProject(existing.id, { task_list_id: opts.taskListId });
+        }
+      } else {
+        project = createProject({ name, path: projectPath, task_list_id: opts.taskListId });
+      }
 
       if (globalOpts.json) {
         output(project, true);
       } else {
         console.log(chalk.green(`Project registered: ${project.name} (${project.path})`));
+        if (project.task_list_id) console.log(chalk.dim(`  Task list: ${project.task_list_id}`));
       }
       return;
     }
@@ -615,7 +724,8 @@ program
 
     console.log(chalk.bold(`${projects.length} project(s):\n`));
     for (const p of projects) {
-      console.log(`${chalk.dim(p.id.slice(0, 8))} ${chalk.bold(p.name)} ${chalk.dim(p.path)}${p.description ? ` - ${p.description}` : ""}`);
+      const taskList = p.task_list_id ? chalk.cyan(` [${p.task_list_id}]`) : "";
+      console.log(`${chalk.dim(p.id.slice(0, 8))} ${chalk.bold(p.name)} ${chalk.dim(p.path)}${taskList}${p.description ? ` - ${p.description}` : ""}`);
     }
   });
 
@@ -643,37 +753,59 @@ program
 
 // sync
 
-function resolveClaudeTaskListId(explicit?: string): string | null {
-  return explicit
-    || process.env["TODOS_CLAUDE_TASK_LIST"]
-    || process.env["CLAUDE_CODE_TASK_LIST_ID"]
-    || process.env["CLAUDE_CODE_SESSION_ID"]
-    || null;
+function resolveTaskListId(agent: string, explicit?: string, projectTaskListId?: string | null): string | null {
+  if (explicit) return explicit;
+  const normalized = agent.trim().toLowerCase();
+  if (normalized === "claude" || normalized === "claude-code" || normalized === "claude_code") {
+    return process.env["TODOS_CLAUDE_TASK_LIST"]
+      || process.env["CLAUDE_CODE_TASK_LIST_ID"]
+      || process.env["CLAUDE_CODE_SESSION_ID"]
+      || getAgentTaskListId(normalized)
+      || projectTaskListId
+      || null;
+  }
+  const key = `TODOS_${normalized.toUpperCase()}_TASK_LIST`;
+  return process.env[key]
+    || process.env["TODOS_TASK_LIST_ID"]
+    || getAgentTaskListId(normalized)
+    || "default";
 }
 
 program
   .command("sync")
-  .description("Sync tasks with a Claude Code task list")
-  .option("--task-list <id>", "Task list ID (auto-detects from CLAUDE_CODE_TASK_LIST_ID or CLAUDE_CODE_SESSION_ID)")
-  .option("--push", "One-way: push SQLite tasks to Claude task list")
-  .option("--pull", "One-way: pull Claude task list into SQLite")
+  .description("Sync tasks with an agent task list (Claude uses native task list; others use JSON lists)")
+  .option("--task-list <id>", "Task list ID (Claude auto-detects from CLAUDE_CODE_TASK_LIST_ID or CLAUDE_CODE_SESSION_ID)")
+  .option("--agent <name>", "Agent/provider to sync (default: claude)")
+  .option("--all", "Sync across all configured agents (TODOS_SYNC_AGENTS or default: claude,codex,gemini)")
+  .option("--push", "One-way: push SQLite tasks to agent task list")
+  .option("--pull", "One-way: pull agent task list into SQLite")
+  .option("--prefer <side>", "Conflict strategy: local or remote", "remote")
   .action((opts) => {
     const globalOpts = program.opts();
-    const projectId = autoProject(globalOpts);
-    const taskListId = resolveClaudeTaskListId(opts.taskList);
-
-    if (!taskListId) {
-      console.error(chalk.red("Could not detect task list ID. Use --task-list <id>, or run inside a Claude Code session."));
-      process.exit(1);
-    }
+    const project = autoDetectProject(globalOpts);
+    const projectId = project?.id;
+    const direction = opts.push && !opts.pull ? "push" : opts.pull && !opts.push ? "pull" : "both";
 
     let result;
-    if (opts.push && !opts.pull) {
-      result = pushToClaudeTaskList(taskListId, projectId);
-    } else if (opts.pull && !opts.push) {
-      result = pullFromClaudeTaskList(taskListId, projectId);
+    const prefer = (opts.prefer as string | undefined) === "local" ? "local" : "remote";
+
+    if (opts.all) {
+      const agents = defaultSyncAgents();
+      result = syncWithAgents(
+        agents,
+        (agent) => resolveTaskListId(agent, opts.taskList, project?.task_list_id),
+        projectId,
+        direction,
+        { prefer },
+      );
     } else {
-      result = syncClaudeTaskList(taskListId, projectId);
+      const agent = (opts.agent as string | undefined) || "claude";
+      const taskListId = resolveTaskListId(agent, opts.taskList, project?.task_list_id);
+      if (!taskListId) {
+        console.error(chalk.red(`Could not detect task list ID for ${agent}. Use --task-list <id> or set appropriate env vars.`));
+        process.exit(1);
+      }
+      result = syncWithAgent(agent, taskListId, projectId, direction, { prefer });
     }
 
     if (globalOpts.json) {
@@ -681,8 +813,8 @@ program
       return;
     }
 
-    if (result.pulled > 0) console.log(chalk.green(`Pulled ${result.pulled} task(s) from Claude task list.`));
-    if (result.pushed > 0) console.log(chalk.green(`Pushed ${result.pushed} task(s) to Claude task list.`));
+    if (result.pulled > 0) console.log(chalk.green(`Pulled ${result.pulled} task(s).`));
+    if (result.pushed > 0) console.log(chalk.green(`Pushed ${result.pushed} task(s).`));
     if (result.pulled === 0 && result.pushed === 0 && result.errors.length === 0) {
       console.log(chalk.dim("Nothing to sync."));
     }
@@ -707,35 +839,28 @@ hooks
       if (p) todosBin = p;
     } catch { /* use default */ }
 
-    // Create hook script — reads session_id from stdin JSON
+    // Create hook script — uses session ID if available, otherwise project-based auto-detection
     const hooksDir = join(process.cwd(), ".claude", "hooks");
     if (!existsSync(hooksDir)) mkdirSync(hooksDir, { recursive: true });
 
     const hookScript = `#!/usr/bin/env bash
 # Auto-generated by: todos hooks install
 # Syncs todos with Claude Code task list on tool use events.
-# Reads session_id and tool_name from the hook JSON stdin.
+# Uses session_id when available; falls back to project-based task_list_id.
 
 INPUT=$(cat)
 
-# Extract session_id from stdin JSON (hooks always receive this)
 SESSION_ID=$(echo "$INPUT" | grep -o '"session_id":"[^"]*"' | head -1 | cut -d'"' -f4 2>/dev/null || true)
-
-# Task list priority: env override > session ID from hook input
-TASK_LIST="\${TODOS_CLAUDE_TASK_LIST:-\${CLAUDE_CODE_TASK_LIST_ID:-$SESSION_ID}}"
-
-if [ -z "$TASK_LIST" ]; then
-  exit 0
-fi
+TASK_LIST="\${TODOS_CLAUDE_TASK_LIST:-\${SESSION_ID}}"
 
 TOOL_NAME=$(echo "$INPUT" | grep -o '"tool_name":"[^"]*"' | head -1 | cut -d'"' -f4 2>/dev/null || true)
 
 case "$TOOL_NAME" in
   TaskCreate|TaskUpdate)
-    ${todosBin} sync --pull --task-list "$TASK_LIST" 2>/dev/null || true
+    TODOS_CLAUDE_TASK_LIST="$TASK_LIST" ${todosBin} sync --all --pull 2>/dev/null || true
     ;;
   mcp__todos__*)
-    ${todosBin} sync --push --task-list "$TASK_LIST" 2>/dev/null || true
+    TODOS_CLAUDE_TASK_LIST="$TASK_LIST" ${todosBin} sync --all --push 2>/dev/null || true
     ;;
 esac
 
@@ -781,7 +906,7 @@ exit 0
     hooksConfig["PostToolUse"] = filtered;
     writeJsonFile(settingsPath, settings);
     console.log(chalk.green(`Claude Code hooks configured in: ${settingsPath}`));
-    console.log(chalk.dim("Task list ID auto-detected from hook stdin session_id."));
+    console.log(chalk.dim("Task list ID auto-detected from project."));
   });
 
 // mcp

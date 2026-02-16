@@ -75,6 +75,36 @@ Or start manually via stdio:
 todos-mcp
 ```
 
+## Sync (Optional)
+
+Claude supports a native task list. Other agents use JSON task lists under `~/.todos/agents/<agent>/<task_list_id>/`.
+
+```bash
+todos sync --agent claude --task-list <id>
+todos sync --agent codex --task-list default
+todos sync --all --task-list <id>
+todos sync --prefer local
+```
+
+Env overrides:
+- `TODOS_SYNC_AGENTS` (comma-separated list for `--all`)
+- `TODOS_TASK_LIST_ID` or `TODOS_<AGENT>_TASK_LIST`
+- `TODOS_AGENT_TASKS_DIR` or `TODOS_<AGENT>_TASKS_DIR`
+
+Config file: `~/.todos/config.json`
+
+```json
+{
+  "sync_agents": ["claude", "codex", "gemini"],
+  "task_list_id": "default",
+  "agent_tasks_dir": "/Users/you/.todos/agents",
+  "agents": {
+    "claude": { "task_list_id": "session-or-project-id" },
+    "codex": { "task_list_id": "default", "tasks_dir": "/Users/you/.todos/agents" }
+  }
+}
+```
+
 ## CLI Commands
 
 | Command | Description |
@@ -112,8 +142,10 @@ completeTask(task.id);
 SQLite database with automatic location detection:
 
 1. `TODOS_DB_PATH` environment variable (`:memory:` for testing)
-2. `.todos/todos.db` in current directory
+2. Nearest `.todos/todos.db` in current directory or any parent
 3. `~/.todos/todos.db` global fallback
+
+Set `TODOS_DB_SCOPE=project` to force project-level DB at the git root (if found).
 
 ## Development
 

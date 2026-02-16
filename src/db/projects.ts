@@ -3,6 +3,10 @@ import type { CreateProjectInput, Project } from "../types/index.js";
 import { ProjectNotFoundError } from "../types/index.js";
 import { getDatabase, now, uuid } from "./database.js";
 
+export function slugify(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
 export function createProject(
   input: CreateProjectInput,
   db?: Database,
@@ -10,11 +14,12 @@ export function createProject(
   const d = db || getDatabase();
   const id = uuid();
   const timestamp = now();
+  const taskListId = input.task_list_id ?? `todos-${slugify(input.name)}`;
 
   d.run(
-    `INSERT INTO projects (id, name, path, description, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [id, input.name, input.path, input.description || null, timestamp, timestamp],
+    `INSERT INTO projects (id, name, path, description, task_list_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [id, input.name, input.path, input.description || null, taskListId, timestamp, timestamp],
   );
 
   return getProject(id, d)!;
@@ -43,7 +48,7 @@ export function listProjects(db?: Database): Project[] {
 
 export function updateProject(
   id: string,
-  input: Partial<Pick<Project, "name" | "description">>,
+  input: Partial<Pick<Project, "name" | "description" | "task_list_id">>,
   db?: Database,
 ): Project {
   const d = db || getDatabase();
@@ -60,6 +65,10 @@ export function updateProject(
   if (input.description !== undefined) {
     sets.push("description = ?");
     params.push(input.description);
+  }
+  if (input.task_list_id !== undefined) {
+    sets.push("task_list_id = ?");
+    params.push(input.task_list_id);
   }
 
   params.push(id);

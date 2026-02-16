@@ -6,6 +6,8 @@ export interface TaskView {
   priority: "low" | "medium" | "high" | "critical";
   project_id?: string;
   project_name?: string;
+  plan_id?: string;
+  plan_name?: string;
   parent_id?: string;
   agent_id?: string;
   session_id?: string;
@@ -23,12 +25,35 @@ export interface TaskView {
   comment_count?: number;
 }
 
+export interface PlanView {
+  id: string;
+  name: string;
+  description?: string;
+  status: "active" | "completed" | "archived";
+  project_id?: string;
+  project_name?: string;
+  task_count?: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ProjectView {
   id: string;
   name: string;
   path?: string;
   description?: string;
+  task_list_id?: string;
   created_at: string;
   updated_at: string;
   task_count?: number;
+}
+
+export interface ApiKeyView {
+  id: string;
+  name: string;
+  key_prefix: string;
+  key?: string; // full key, only on creation
+  created_at: string;
+  last_used_at?: string;
+  expires_at?: string;
 }

@@ -18,16 +18,26 @@ import {
 import { addComment } from "../db/comments.js";
 import {
   createProject,
+  getProject,
   listProjects,
 } from "../db/projects.js";
+import {
+  createPlan,
+  getPlan,
+  listPlans,
+  updatePlan,
+  deletePlan,
+} from "../db/plans.js";
 import { searchTasks } from "../lib/search.js";
-import { pushToClaudeTaskList, pullFromClaudeTaskList, syncClaudeTaskList } from "../lib/claude-tasks.js";
+import { defaultSyncAgents, syncWithAgent, syncWithAgents } from "../lib/sync.js";
+import { getAgentTaskListId } from "../lib/config.js";
 import { getDatabase, resolvePartialId } from "../db/database.js";
 import {
   VersionConflictError,
   TaskNotFoundError,
   LockError,
   DependencyCycleError,
+  PlanNotFoundError,
 } from "../types/index.js";
 import type { Task } from "../types/index.js";
 
@@ -39,6 +49,7 @@ const server = new McpServer({
 function formatError(error: unknown): string {
   if (error instanceof VersionConflictError) return `Version conflict: ${error.message}`;
   if (error instanceof TaskNotFoundError) return `Not found: ${error.message}`;
+  if (error instanceof PlanNotFoundError) return `Not found: ${error.message}`;
   if (error instanceof LockError) return `Lock error: ${error.message}`;
   if (error instanceof DependencyCycleError) return `Dependency cycle: ${error.message}`;
   if (error instanceof Error) return error.message;
@@ -50,6 +61,23 @@ function resolveId(partialId: string, table = "tasks"): string {
   const id = resolvePartialId(db, table, partialId);
   if (!id) throw new Error(`Could not resolve ID: ${partialId}`);
   return id;
+}
+
+function resolveTaskListId(agent: string, explicit?: string): string | null {
+  if (explicit) return explicit;
+  const normalized = agent.trim().toLowerCase();
+  if (normalized === "claude" || normalized === "claude-code" || normalized === "claude_code") {
+    return process.env["TODOS_CLAUDE_TASK_LIST"]
+      || process.env["CLAUDE_CODE_TASK_LIST_ID"]
+      || process.env["CLAUDE_CODE_SESSION_ID"]
+      || getAgentTaskListId(normalized)
+      || null;
+  }
+  const key = `TODOS_${normalized.toUpperCase()}_TASK_LIST`;
+  return process.env[key]
+    || process.env["TODOS_TASK_LIST_ID"]
+    || getAgentTaskListId(normalized)
+    || "default";
 }
 
 function formatTask(task: Task): string {
@@ -65,6 +93,7 @@ function formatTask(task: Task): string {
   if (task.locked_by) parts.push(`Locked by: ${task.locked_by}`);
   if (task.parent_id) parts.push(`Parent: ${task.parent_id}`);
   if (task.project_id) parts.push(`Project: ${task.project_id}`);
+  if (task.plan_id) parts.push(`Plan: ${task.plan_id}`);
   if (task.tags.length > 0) parts.push(`Tags: ${task.tags.join(", ")}`);
   parts.push(`Version: ${task.version}`);
   parts.push(`Created: ${task.created_at}`);
@@ -89,6 +118,7 @@ server.tool(
     assigned_to: z.string().optional().describe("Assigned agent ID"),
     session_id: z.string().optional().describe("Session ID"),
     working_dir: z.string().optional().describe("Working directory context"),
+    plan_id: z.string().optional().describe("Plan ID to assign task to"),
     tags: z.array(z.string()).optional().describe("Task tags"),
     metadata: z.record(z.unknown()).optional().describe("Arbitrary metadata"),
   },
@@ -97,6 +127,7 @@ server.tool(
       const resolved = { ...params };
       if (resolved.project_id) resolved.project_id = resolveId(resolved.project_id, "projects");
       if (resolved.parent_id) resolved.parent_id = resolveId(resolved.parent_id);
+      if (resolved.plan_id) resolved.plan_id = resolveId(resolved.plan_id, "plans");
       const task = createTask(resolved);
       return { content: [{ type: "text" as const, text: `Task created:\n${formatTask(task)}` }] };
     } catch (e) {
@@ -121,11 +152,13 @@ server.tool(
     ]).optional().describe("Filter by priority"),
     assigned_to: z.string().optional().describe("Filter by assigned agent"),
     tags: z.array(z.string()).optional().describe("Filter by tags (any match)"),
+    plan_id: z.string().optional().describe("Filter by plan"),
   },
   async (params) => {
     try {
       const resolved = { ...params };
       if (resolved.project_id) resolved.project_id = resolveId(resolved.project_id, "projects");
+      if (resolved.plan_id) resolved.plan_id = resolveId(resolved.plan_id, "plans");
       const tasks = listTasks(resolved);
       if (tasks.length === 0) {
         return { content: [{ type: "text" as const, text: "No tasks found." }] };
@@ -207,6 +240,7 @@ server.tool(
     assigned_to: z.string().optional().describe("Assign to agent"),
     tags: z.array(z.string()).optional().describe("New tags"),
     metadata: z.record(z.unknown()).optional().describe("New metadata"),
+    plan_id: z.string().optional().describe("Plan ID to assign task to"),
   },
   async ({ id, ...rest }) => {
     try {
@@ -398,9 +432,10 @@ server.tool(
       if (projects.length === 0) {
         return { content: [{ type: "text" as const, text: "No projects registered." }] };
       }
-      const text = projects.map((p) =>
-        `${p.id.slice(0, 8)} | ${p.name} | ${p.path}${p.description ? ` - ${p.description}` : ""}`,
-      ).join("\n");
+      const text = projects.map((p) => {
+        const taskList = p.task_list_id ? ` [${p.task_list_id}]` : "";
+        return `${p.id.slice(0, 8)} | ${p.name} | ${p.path}${taskList}${p.description ? ` - ${p.description}` : ""}`;
+      }).join("\n");
       return { content: [{ type: "text" as const, text: `${projects.length} project(s):\n${text}` }] };
     } catch (e) {
       return { content: [{ type: "text" as const, text: formatError(e) }], isError: true };
@@ -416,14 +451,145 @@ server.tool(
     name: z.string().describe("Project name"),
     path: z.string().describe("Absolute path to project"),
     description: z.string().optional().describe("Project description"),
+    task_list_id: z.string().optional().describe("Custom task list ID for Claude Code sync (defaults to todos-<slugified-name>)"),
   },
   async (params) => {
     try {
       const project = createProject(params);
+      const taskList = project.task_list_id ? ` [${project.task_list_id}]` : "";
       return {
         content: [{
           type: "text" as const,
-          text: `Project created: ${project.id.slice(0, 8)} | ${project.name} | ${project.path}`,
+          text: `Project created: ${project.id.slice(0, 8)} | ${project.name} | ${project.path}${taskList}`,
+        }],
+      };
+    } catch (e) {
+      return { content: [{ type: "text" as const, text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+// create_plan
+server.tool(
+  "create_plan",
+  "Create a new plan",
+  {
+    name: z.string().describe("Plan name"),
+    project_id: z.string().optional().describe("Project ID"),
+    description: z.string().optional().describe("Plan description"),
+    status: z.enum(["active", "completed", "archived"]).optional().describe("Plan status"),
+  },
+  async (params) => {
+    try {
+      const resolved = { ...params };
+      if (resolved.project_id) resolved.project_id = resolveId(resolved.project_id, "projects");
+      const plan = createPlan(resolved);
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Plan created: ${plan.id.slice(0, 8)} | ${plan.name} | ${plan.status}`,
+        }],
+      };
+    } catch (e) {
+      return { content: [{ type: "text" as const, text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+// list_plans
+server.tool(
+  "list_plans",
+  "List plans with optional project filter",
+  {
+    project_id: z.string().optional().describe("Filter by project"),
+  },
+  async ({ project_id }) => {
+    try {
+      const resolvedProjectId = project_id ? resolveId(project_id, "projects") : undefined;
+      const plans = listPlans(resolvedProjectId);
+      if (plans.length === 0) {
+        return { content: [{ type: "text" as const, text: "No plans found." }] };
+      }
+      const text = plans.map((p) => {
+        const project = p.project_id ? ` (project: ${p.project_id.slice(0, 8)})` : "";
+        return `[${p.status}] ${p.id.slice(0, 8)} | ${p.name}${project}`;
+      }).join("\n");
+      return { content: [{ type: "text" as const, text: `${plans.length} plan(s):\n${text}` }] };
+    } catch (e) {
+      return { content: [{ type: "text" as const, text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+// get_plan
+server.tool(
+  "get_plan",
+  "Get plan details",
+  {
+    id: z.string().describe("Plan ID (full or partial)"),
+  },
+  async ({ id }) => {
+    try {
+      const resolvedId = resolveId(id, "plans");
+      const plan = getPlan(resolvedId);
+      if (!plan) return { content: [{ type: "text" as const, text: `Plan not found: ${id}` }], isError: true };
+      const parts = [
+        `ID: ${plan.id}`,
+        `Name: ${plan.name}`,
+        `Status: ${plan.status}`,
+      ];
+      if (plan.description) parts.push(`Description: ${plan.description}`);
+      if (plan.project_id) parts.push(`Project: ${plan.project_id}`);
+      parts.push(`Created: ${plan.created_at}`);
+      parts.push(`Updated: ${plan.updated_at}`);
+      return { content: [{ type: "text" as const, text: parts.join("\n") }] };
+    } catch (e) {
+      return { content: [{ type: "text" as const, text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+// update_plan
+server.tool(
+  "update_plan",
+  "Update a plan",
+  {
+    id: z.string().describe("Plan ID (full or partial)"),
+    name: z.string().optional().describe("New name"),
+    description: z.string().optional().describe("New description"),
+    status: z.enum(["active", "completed", "archived"]).optional().describe("New status"),
+  },
+  async ({ id, ...rest }) => {
+    try {
+      const resolvedId = resolveId(id, "plans");
+      const plan = updatePlan(resolvedId, rest);
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Plan updated: ${plan.id.slice(0, 8)} | ${plan.name} | ${plan.status}`,
+        }],
+      };
+    } catch (e) {
+      return { content: [{ type: "text" as const, text: formatError(e) }], isError: true };
+    }
+  },
+);
+
+// delete_plan
+server.tool(
+  "delete_plan",
+  "Delete a plan",
+  {
+    id: z.string().describe("Plan ID (full or partial)"),
+  },
+  async ({ id }) => {
+    try {
+      const resolvedId = resolveId(id, "plans");
+      const deleted = deletePlan(resolvedId);
+      return {
+        content: [{
+          type: "text" as const,
+          text: deleted ? `Plan ${id} deleted.` : `Plan ${id} not found.`,
         }],
       };
     } catch (e) {
@@ -460,29 +626,50 @@ server.tool(
 // 16. sync
 server.tool(
   "sync",
-  "Sync tasks with a Claude Code task list. Writes SQLite tasks as JSON files to ~/.claude/tasks/<task_list_id>/ so they appear in Claude Code's native task UI. The task_list_id is your Claude Code session ID (visible in the conversation or via CLAUDE_CODE_SESSION_ID).",
+  "Sync tasks with an agent task list (Claude uses native task list; others use JSON lists).",
   {
-    task_list_id: z.string().describe("Claude Code task list ID — use your session ID"),
-    project_id: z.string().optional().describe("Limit sync to a project"),
-    direction: z.enum(["push", "pull", "both"]).optional().describe("Sync direction: push (SQLite->Claude), pull (Claude->SQLite), or both (default)"),
+    task_list_id: z.string().optional().describe("Task list ID (required for Claude)"),
+    agent: z.string().optional().describe("Agent/provider name (default: claude)"),
+    all_agents: z.boolean().optional().describe("Sync across all configured agents"),
+    project_id: z.string().optional().describe("Project ID — its task_list_id will be used for Claude if task_list_id is not provided"),
+    direction: z.enum(["push", "pull", "both"]).optional().describe("Sync direction: push (SQLite->agent), pull (agent->SQLite), or both (default)"),
+    prefer: z.enum(["local", "remote"]).optional().describe("Conflict strategy"),
   },
-  async ({ task_list_id, project_id, direction }) => {
+  async ({ task_list_id, agent, all_agents, project_id, direction, prefer }) => {
     try {
       const resolvedProjectId = project_id ? resolveId(project_id, "projects") : undefined;
-      const taskListId = task_list_id;
+      const project = resolvedProjectId ? getProject(resolvedProjectId) : undefined;
+      const dir = direction ?? "both";
+      const options = { prefer: prefer ?? "remote" };
 
       let result;
-      if (direction === "push") {
-        result = pushToClaudeTaskList(taskListId, resolvedProjectId);
-      } else if (direction === "pull") {
-        result = pullFromClaudeTaskList(taskListId, resolvedProjectId);
+      if (all_agents) {
+        const agents = defaultSyncAgents();
+        result = syncWithAgents(
+          agents,
+          (a) => resolveTaskListId(a, task_list_id || project?.task_list_id || undefined),
+          resolvedProjectId,
+          dir,
+          options,
+        );
       } else {
-        result = syncClaudeTaskList(taskListId, resolvedProjectId);
+        const resolvedAgent = agent || "claude";
+        const taskListId = resolveTaskListId(resolvedAgent, task_list_id || project?.task_list_id || undefined);
+        if (!taskListId) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: `Could not determine task list ID for ${resolvedAgent}. Provide task_list_id or set task_list_id on the project.`,
+            }],
+            isError: true,
+          };
+        }
+        result = syncWithAgent(resolvedAgent, taskListId, resolvedProjectId, dir, options);
       }
 
       const parts: string[] = [];
-      if (result.pulled > 0) parts.push(`Pulled ${result.pulled} task(s) from Claude task list.`);
-      if (result.pushed > 0) parts.push(`Pushed ${result.pushed} task(s) to Claude task list.`);
+      if (result.pulled > 0) parts.push(`Pulled ${result.pulled} task(s).`);
+      if (result.pushed > 0) parts.push(`Pushed ${result.pushed} task(s).`);
       if (result.pulled === 0 && result.pushed === 0 && result.errors.length === 0) {
         parts.push("Nothing to sync.");
       }
