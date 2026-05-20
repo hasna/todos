@@ -25,6 +25,7 @@ const [
   { registerDispatchCommands },
   { registerMachineCommands },
   { registerApiKeyCommands },
+  { registerEventCommands },
 ] = await Promise.all([
   import("./commands/task-commands.js"),
   import("./commands/plan-template-commands.js"),
@@ -36,6 +37,7 @@ const [
   import("./commands/dispatch.js"),
   import("./commands/machines.js"),
   import("./commands/api-key-commands.js"),
+  import("./commands/events.js"),
 ]);
 
 registerTaskCommands(program);
@@ -48,5 +50,6 @@ registerMcpHooksCommands(program);
 registerDispatchCommands(program);
 registerMachineCommands(program);
 registerApiKeyCommands(program);
+registerEventCommands(program);
 
 program.parse();

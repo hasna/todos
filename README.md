@@ -8,7 +8,7 @@ Universal task management for AI coding agents - CLI + MCP server + interactive 
 ## Install
 
 ```bash
-npm install -g @hasna/todos
+bun install -g @hasna/todos
 ```
 
 ## CLI Usage
@@ -26,11 +26,26 @@ todos-mcp
 The MCP server defaults to the token-saving `TODOS_PROFILE=minimal` profile.
 Use `TODOS_PROFILE=standard` for broader task/project/resource tools, or
 `TODOS_PROFILE=full` when you explicitly need every tool. You can add groups
-with `TODOS_TOOL_GROUPS=templates`.
+with `TODOS_TOOL_GROUPS=templates,events`.
 
 High-volume tools return compact payloads by default. Pass `detail: "full"` to
 MCP calls such as `get_task`, `get_status`, `get_context`, `bootstrap`, and
 `task_context` when you need full data.
+
+## Local Event Stream
+
+Mutations are written to an append-only local event stream. The SQLite-backed
+stream is queryable from CLI and MCP, and the same events are appended as JSONL
+beside the local database at `.todos/events.jsonl` or
+`~/.hasna/todos/events.jsonl`.
+
+```bash
+todos events --jsonl
+todos events --since-sequence 42 --jsonl
+```
+
+MCP agents can use `tail_events` with the last seen `sequence` to coordinate
+without polling full task state or calling hosted services.
 
 ## REST API
 

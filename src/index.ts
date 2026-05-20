@@ -234,6 +234,17 @@ export {
 export { logTaskChange, getTaskHistory, getRecentActivity, getRecap } from "./db/audit.js";
 export type { RecapSummary } from "./db/audit.js";
 
+// Local event stream
+export {
+  getLocalEventLogPath,
+  listLocalEvents,
+  localEventsToJsonl,
+  recordLocalEvent,
+  serializeLocalEvent,
+  toLocalEventJsonLine,
+} from "./db/events.js";
+export type { CreateLocalEventInput, LocalEvent, LocalEventFilter, LocalEventJsonLine } from "./db/events.js";
+
 // Training data gatherer (for @hasna/brains fine-tuning integration)
 export { gatherTrainingData } from "./lib/gatherer.js";
 

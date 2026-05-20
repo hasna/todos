@@ -2,6 +2,7 @@ import type { Database, SQLQueryBindings } from "bun:sqlite";
 import type { CreatePlanInput, Plan, UpdatePlanInput } from "../types/index.js";
 import { PlanNotFoundError } from "../types/index.js";
 import { getDatabase, now, uuid } from "./database.js";
+import { recordLocalEvent } from "./events.js";
 
 export function createPlan(input: CreatePlanInput, db?: Database): Plan {
   const d = db || getDatabase();
@@ -24,7 +25,18 @@ export function createPlan(input: CreatePlanInput, db?: Database): Plan {
     ],
   );
 
-  return getPlan(id, d)!;
+  const plan = getPlan(id, d)!;
+  recordLocalEvent({
+    event_type: "plan.created",
+    entity_type: "plan",
+    entity_id: plan.id,
+    project_id: plan.project_id,
+    plan_id: plan.id,
+    agent_id: plan.agent_id,
+    data: { name: plan.name, status: plan.status, task_list_id: plan.task_list_id },
+    created_at: timestamp,
+  }, d);
+  return plan;
 }
 
 export function getPlan(id: string, db?: Database): Plan | null {
@@ -81,11 +93,33 @@ export function updatePlan(
   params.push(id);
   d.run(`UPDATE plans SET ${sets.join(", ")} WHERE id = ?`, params);
 
-  return getPlan(id, d)!;
+  const updated = getPlan(id, d)!;
+  recordLocalEvent({
+    event_type: "plan.updated",
+    entity_type: "plan",
+    entity_id: id,
+    project_id: updated.project_id,
+    plan_id: id,
+    agent_id: updated.agent_id,
+    data: { changed_fields: Object.keys(input), status: updated.status },
+  }, d);
+  return updated;
 }
 
 export function deletePlan(id: string, db?: Database): boolean {
   const d = db || getDatabase();
+  const plan = getPlan(id, d);
   const result = d.run("DELETE FROM plans WHERE id = ?", [id]);
+  if (result.changes > 0) {
+    recordLocalEvent({
+      event_type: "plan.deleted",
+      entity_type: "plan",
+      entity_id: id,
+      project_id: plan?.project_id ?? null,
+      plan_id: id,
+      agent_id: plan?.agent_id ?? null,
+      data: { name: plan?.name ?? null },
+    }, d);
+  }
   return result.changes > 0;
 }

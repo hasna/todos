@@ -855,4 +855,28 @@ export const MIGRATIONS = [
   CREATE INDEX IF NOT EXISTS idx_api_keys_active ON api_keys(revoked_at, expires_at);
   INSERT OR IGNORE INTO _migrations (id) VALUES (50);
   `,
+  // Migration 51: Local append-only JSONL event stream
+  `
+  CREATE TABLE IF NOT EXISTS local_events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    event_type TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT,
+    task_id TEXT,
+    project_id TEXT,
+    plan_id TEXT,
+    agent_id TEXT,
+    data TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_local_events_created ON local_events(created_at);
+  CREATE INDEX IF NOT EXISTS idx_local_events_type ON local_events(event_type);
+  CREATE INDEX IF NOT EXISTS idx_local_events_entity ON local_events(entity_type, entity_id);
+  CREATE INDEX IF NOT EXISTS idx_local_events_task ON local_events(task_id);
+  CREATE INDEX IF NOT EXISTS idx_local_events_project ON local_events(project_id);
+  CREATE INDEX IF NOT EXISTS idx_local_events_plan ON local_events(plan_id);
+  CREATE INDEX IF NOT EXISTS idx_local_events_agent ON local_events(agent_id);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (51);
+  `,
 ];

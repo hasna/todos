@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { TaskHistory } from "../types/index.js";
 import { getDatabase, now, uuid } from "./database.js";
+import { recordLocalEvent } from "./events.js";
 
 export function logTaskChange(
   taskId: string,
@@ -19,6 +20,15 @@ export function logTaskChange(
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [id, taskId, action, field || null, oldValue ?? null, newValue ?? null, agentId || null, timestamp],
   );
+  recordLocalEvent({
+    event_type: `task.${action}`,
+    entity_type: "task",
+    entity_id: taskId,
+    task_id: taskId,
+    agent_id: agentId || null,
+    data: { history_id: id, action, field: field || null, old_value: oldValue ?? null, new_value: newValue ?? null },
+    created_at: timestamp,
+  }, d);
   return { id, task_id: taskId, action, field: field || null, old_value: oldValue ?? null, new_value: newValue ?? null, agent_id: agentId || null, created_at: timestamp };
 }
 

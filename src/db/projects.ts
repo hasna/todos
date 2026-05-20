@@ -2,6 +2,7 @@ import type { Database, SQLQueryBindings } from "bun:sqlite";
 import type { CreateProjectInput, CreateProjectSourceInput, Project, ProjectSource, ProjectSourceRow } from "../types/index.js";
 import { ProjectNotFoundError } from "../types/index.js";
 import { getDatabase, now, uuid } from "./database.js";
+import { recordLocalEvent } from "./events.js";
 import { getMachineId } from "./machines.js";
 
 export function slugify(name: string): string {
@@ -47,7 +48,16 @@ export function createProject(
     [id, input.name, input.path, input.description || null, taskListId, taskPrefix, timestamp, timestamp],
   );
 
-  return getProject(id, d)!;
+  const project = getProject(id, d)!;
+  recordLocalEvent({
+    event_type: "project.created",
+    entity_type: "project",
+    entity_id: project.id,
+    project_id: project.id,
+    data: { name: project.name, path: project.path, task_list_id: project.task_list_id },
+    created_at: timestamp,
+  }, d);
+  return project;
 }
 
 export function getProject(id: string, db?: Database): Project | null {
@@ -111,7 +121,15 @@ export function updateProject(
   params.push(id);
   d.run(`UPDATE projects SET ${sets.join(", ")} WHERE id = ?`, params);
 
-  return getProject(id, d)!;
+  const updated = getProject(id, d)!;
+  recordLocalEvent({
+    event_type: "project.updated",
+    entity_type: "project",
+    entity_id: id,
+    project_id: id,
+    data: { changed_fields: Object.keys(input), name: updated.name, path: updated.path },
+  }, d);
+  return updated;
 }
 
 /**
@@ -161,12 +179,30 @@ export function renameProject(
     d.run("UPDATE projects SET name = ?, updated_at = ? WHERE id = ?", [input.name, ts, id]);
   }
 
-  return { project: getProject(id, d)!, task_lists_updated: taskListsUpdated };
+  const updated = getProject(id, d)!;
+  recordLocalEvent({
+    event_type: "project.renamed",
+    entity_type: "project",
+    entity_id: id,
+    project_id: id,
+    data: { name: updated.name, task_list_id: updated.task_list_id, task_lists_updated: taskListsUpdated },
+  }, d);
+  return { project: updated, task_lists_updated: taskListsUpdated };
 }
 
 export function deleteProject(id: string, db?: Database): boolean {
   const d = db || getDatabase();
+  const project = getProject(id, d);
   const result = d.run("DELETE FROM projects WHERE id = ?", [id]);
+  if (result.changes > 0) {
+    recordLocalEvent({
+      event_type: "project.deleted",
+      entity_type: "project",
+      entity_id: id,
+      project_id: id,
+      data: { name: project?.name ?? null, path: project?.path ?? null },
+    }, d);
+  }
   return result.changes > 0;
 }
 
@@ -189,12 +225,31 @@ export function addProjectSource(input: CreateProjectSourceInput, db?: Database)
     [id, input.project_id, input.type, input.name, input.uri, input.description || null,
      JSON.stringify(input.metadata || {}), timestamp, timestamp],
   );
-  return rowToSource(d.query("SELECT * FROM project_sources WHERE id = ?").get(id) as ProjectSourceRow);
+  const source = rowToSource(d.query("SELECT * FROM project_sources WHERE id = ?").get(id) as ProjectSourceRow);
+  recordLocalEvent({
+    event_type: "project.source.created",
+    entity_type: "project_source",
+    entity_id: source.id,
+    project_id: source.project_id,
+    data: { type: source.type, name: source.name, uri: source.uri },
+    created_at: timestamp,
+  }, d);
+  return source;
 }
 
 export function removeProjectSource(id: string, db?: Database): boolean {
   const d = db || getDatabase();
+  const source = d.query("SELECT * FROM project_sources WHERE id = ?").get(id) as ProjectSourceRow | null;
   const result = d.run("DELETE FROM project_sources WHERE id = ?", [id]);
+  if (result.changes > 0 && source) {
+    recordLocalEvent({
+      event_type: "project.source.deleted",
+      entity_type: "project_source",
+      entity_id: id,
+      project_id: source.project_id,
+      data: { type: source.type, name: source.name, uri: source.uri },
+    }, d);
+  }
   return result.changes > 0;
 }
 

@@ -1,5 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { getDatabase, now, uuid } from "./database.js";
+import { recordLocalEvent } from "./events.js";
+import { getTask } from "./tasks.js";
 
 export interface Checkpoint {
   id: string;
@@ -71,7 +73,20 @@ export function upsertCheckpoint(
     ],
   );
 
-  return rowToCheckpoint(d.query("SELECT * FROM task_checkpoints WHERE id = ?").get(id))!;
+  const checkpoint = rowToCheckpoint(d.query("SELECT * FROM task_checkpoints WHERE id = ?").get(id))!;
+  const task = getTask(task_id, d);
+  recordLocalEvent({
+    event_type: existing ? "run.checkpoint.updated" : "run.checkpoint.created",
+    entity_type: "run",
+    entity_id: checkpoint.id,
+    task_id,
+    project_id: task?.project_id ?? null,
+    plan_id: task?.plan_id ?? null,
+    agent_id: checkpoint.agent_id,
+    data: { step: checkpoint.step, status: checkpoint.status, attempt: checkpoint.attempt },
+    created_at: timestamp,
+  }, d);
+  return checkpoint;
 }
 
 export function getCheckpoint(taskId: string, step: string, db?: Database): Checkpoint | null {
@@ -114,7 +129,20 @@ export function emitHeartbeat(
     [id, task_id, agentId, step, message, progress, meta, now()],
   );
 
-  return rowToHeartbeat(d.query("SELECT * FROM task_heartbeats WHERE id = ?").get(id))!;
+  const heartbeat = rowToHeartbeat(d.query("SELECT * FROM task_heartbeats WHERE id = ?").get(id))!;
+  const task = getTask(task_id, d);
+  recordLocalEvent({
+    event_type: "run.heartbeat",
+    entity_type: "run",
+    entity_id: heartbeat.id,
+    task_id,
+    project_id: task?.project_id ?? null,
+    plan_id: task?.plan_id ?? null,
+    agent_id: heartbeat.agent_id,
+    data: { step: heartbeat.step, message: heartbeat.message, progress: heartbeat.progress },
+    created_at: heartbeat.created_at,
+  }, d);
+  return heartbeat;
 }
 
 export function getLastHeartbeat(taskId: string, db?: Database): Heartbeat | null {

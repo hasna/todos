@@ -23,6 +23,7 @@ The stable contracts cover these object IDs:
 - `checkpoint`
 - `dispatch`
 - `audit_history`
+- `local_event`
 - `status_summary`
 - `structured_error`
 - `api_error`

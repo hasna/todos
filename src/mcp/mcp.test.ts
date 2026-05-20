@@ -12,6 +12,7 @@ import { registerTaskRelTools } from "./tools/task-rel-tools.js";
 import { registerTaskAdvTools } from "./tools/task-adv-tools.js";
 import { registerTaskAutoTools } from "./tools/task-auto-tools.js";
 import { registerAgentTools } from "./tools/agents.js";
+import { registerEventTools } from "./tools/events.js";
 
 // These tests verify the core operations that the MCP server wraps.
 // The MCP server itself uses stdio transport which is harder to test in unit tests.
@@ -116,6 +117,20 @@ describe("MCP tool operations", () => {
     );
     expect(comment.content).toBe("Test comment");
     expect(comment.agent_id).toBe("claude");
+  });
+
+  it("event tools return local JSON and JSONL streams", async () => {
+    const task = createTask({ title: "Event MCP task" }, db);
+    const tools = captureTools(registerEventTools);
+
+    const listed = await callCapturedTool(tools, "list_events", { event_type: "task.created" });
+    const events = JSON.parse(listed.content[0]!.text);
+    expect(events[0].task_id).toBe(task.id);
+
+    const tailed = await callCapturedTool(tools, "tail_events", { since_sequence: 0 });
+    const line = JSON.parse(tailed.content[0]!.text.trim().split("\n")[0]!);
+    expect(line.type).toBe("task.created");
+    expect(line.entity.id).toBe(task.id);
   });
 
   it("create_project", () => {

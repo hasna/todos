@@ -14,6 +14,7 @@ import {
 import { getDatabase, now, uuid } from "./database.js";
 import { checkCompletionGuard } from "../lib/completion-guard.js";
 import { logTaskChange } from "./audit.js";
+import { recordLocalEvent } from "./events.js";
 import { dispatchWebhook } from "./webhooks.js";
 import { getChecklist } from "./checklists.js";
 
@@ -114,6 +115,23 @@ export function createTask(input: CreateTaskInput, db?: Database): Task {
   }
 
   const task = getTask(id, d)!;
+  recordLocalEvent({
+    event_type: "task.created",
+    entity_type: "task",
+    entity_id: task.id,
+    task_id: task.id,
+    project_id: task.project_id,
+    plan_id: task.plan_id,
+    agent_id: task.agent_id || task.assigned_to,
+    data: {
+      title: task.title,
+      status: task.status,
+      priority: task.priority,
+      task_list_id: task.task_list_id,
+      parent_id: task.parent_id,
+    },
+    created_at: timestamp,
+  }, d);
   dispatchWebhook("task.created", { id: task.id, short_id: task.short_id, title: task.title, status: task.status, priority: task.priority, project_id: task.project_id, assigned_to: task.assigned_to }, d).catch(() => {});
   return task;
 }
@@ -560,6 +578,20 @@ export function updateTask(
     dispatchWebhook("task.status_changed", { id, old_status: task.status, new_status: input.status, title: task.title }, d).catch(() => {});
   }
 
+  const changedFields = Object.entries(input)
+    .filter(([key, value]) => key !== "version" && value !== undefined && (task as any)[key] !== value)
+    .map(([key]) => key);
+  recordLocalEvent({
+    event_type: "task.updated",
+    entity_type: "task",
+    entity_id: id,
+    task_id: id,
+    project_id: input.project_id !== undefined ? input.project_id : task.project_id,
+    plan_id: input.plan_id !== undefined ? input.plan_id : task.plan_id,
+    agent_id: agentId,
+    data: { changed_fields: changedFields, version: task.version + 1 },
+  }, d);
+
   // Return updated task without re-fetching from DB
   return {
     ...task,
@@ -582,6 +614,19 @@ export function updateTask(
 
 export function deleteTask(id: string, db?: Database): boolean {
   const d = db || getDatabase();
+  const task = getTask(id, d);
   const result = d.run("DELETE FROM tasks WHERE id = ?", [id]);
+  if (result.changes > 0) {
+    recordLocalEvent({
+      event_type: "task.deleted",
+      entity_type: "task",
+      entity_id: id,
+      task_id: id,
+      project_id: task?.project_id ?? null,
+      plan_id: task?.plan_id ?? null,
+      agent_id: task?.assigned_to || task?.agent_id || null,
+      data: { title: task?.title ?? null },
+    }, d);
+  }
   return result.changes > 0;
 }

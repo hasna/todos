@@ -172,6 +172,7 @@ export const MCP_TOOL_GROUPS: Record<string, readonly string[]> = {
     "update_template",
   ],
   webhooks: ["create_webhook", "delete_webhook", "list_webhooks"],
+  events: ["list_events", "tail_events"],
   machines: [
     "machines_archive",
     "machines_delete",
@@ -186,9 +187,9 @@ export const MCP_TOOL_GROUPS: Record<string, readonly string[]> = {
 export const MCP_PROFILE_GROUPS: Record<string, readonly string[]> = {
   minimal: ["core"],
   core: ["core"],
-  standard: ["core", "tasks", "projects", "resources", "agents", "metadata"],
-  agent: ["core", "tasks", "projects", "resources"],
-  maintainer: ["core", "tasks", "projects", "resources", "agents", "metadata", "dispatch", "maintenance"],
+  standard: ["core", "tasks", "projects", "resources", "agents", "metadata", "events"],
+  agent: ["core", "tasks", "projects", "resources", "events"],
+  maintainer: ["core", "tasks", "projects", "resources", "agents", "metadata", "dispatch", "events", "maintenance"],
 };
 
 function splitTokens(value: string | undefined): string[] {

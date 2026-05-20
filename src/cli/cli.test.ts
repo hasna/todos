@@ -82,6 +82,45 @@ describe("CLI integration", () => {
     try { unlinkSync("/tmp/test-cli-list.db"); } catch {}
   });
 
+  it("should output local events as JSONL", async () => {
+    const dbPath = "/tmp/test-cli-events.db";
+    const eventPath = "/tmp/test-cli-events.jsonl";
+    const env = { ...process.env, TODOS_DB_PATH: dbPath, TODOS_EVENT_LOG_PATH: eventPath, TODOS_AUTO_PROJECT: "false" };
+    const addProc = Bun.spawn(
+      ["bun", "run", "src/cli/index.tsx", "add", "evented task", "--json"],
+      {
+        cwd: import.meta.dir + "/../..",
+        env,
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    await addProc.exited;
+
+    const eventsProc = Bun.spawn(
+      ["bun", "run", "src/cli/index.tsx", "events", "--jsonl", "--type", "task.created"],
+      {
+        cwd: import.meta.dir + "/../..",
+        env,
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const stdout = await new Response(eventsProc.stdout).text();
+    const exitCode = await eventsProc.exited;
+
+    expect(exitCode).toBe(0);
+    const event = JSON.parse(stdout.trim());
+    expect(event.type).toBe("task.created");
+    expect(event.entity.type).toBe("task");
+    expect(event.data.title).toBe("evented task");
+
+    const { unlinkSync } = await import("node:fs");
+    for (const path of [dbPath, `${dbPath}-shm`, `${dbPath}-wal`, eventPath]) {
+      try { unlinkSync(path); } catch {}
+    }
+  });
+
   it("should run search command", async () => {
     // First add a task, then search for it
     const addProc = Bun.spawn(

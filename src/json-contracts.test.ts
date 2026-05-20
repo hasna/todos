@@ -6,6 +6,7 @@ import { addComment } from "./db/comments.js";
 import { upsertCheckpoint } from "./db/checkpoints.js";
 import { closeDatabase, getDatabase, resetDatabase } from "./db/database.js";
 import { createDispatch } from "./db/dispatches.js";
+import { listLocalEvents } from "./db/events.js";
 import { registerAgent } from "./db/agents.js";
 import { createProject } from "./db/projects.js";
 import { getStatus } from "./db/tasks.js";
@@ -66,6 +67,7 @@ describe("stable JSON contracts", () => {
       "checkpoint",
       "dispatch",
       "audit_history",
+      "local_event",
       "status_summary",
       "structured_error",
       "api_error",
@@ -132,6 +134,7 @@ describe("stable JSON contracts", () => {
       delay_ms: 40,
     }, db);
     const history = logTaskChange(task.id, "update", "status", "pending", "in_progress", "agent-1", db);
+    const event = listLocalEvents({ event_type: "task.created", limit: 1 }, db)[0]!;
     const status = getStatus({ project_id: project.id }, undefined, { explain_blocked: true }, db);
 
     expectValid("project", project);
@@ -143,6 +146,7 @@ describe("stable JSON contracts", () => {
     expectValid("checkpoint", checkpoint);
     expectValid("dispatch", dispatch);
     expectValid("audit_history", history);
+    expectValid("local_event", event);
     expectValid("status_summary", status);
     expectValid("structured_error", {
       code: "TASK_NOT_FOUND",

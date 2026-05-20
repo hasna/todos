@@ -29,6 +29,7 @@ import { registerTaskRelTools } from "./tools/task-rel-tools.js";
 import { registerCodeTools } from "./tools/code-tools.js";
 import { registerMachineTools } from "./tools/machines.js";
 import { registerAgentTools } from "./tools/agents.js";
+import { registerEventTools } from "./tools/events.js";
 import { getPackageVersion } from "../lib/package-version.js";
 import { installMcpTokenTelemetry, shouldRegisterToolForProfile } from "./token-utils.js";
 
@@ -225,6 +226,10 @@ registerMachineTools(server, { shouldRegisterTool, formatError });
 // === DISPATCH ===
 
 registerDispatchTools(server, { shouldRegisterTool, resolveId, formatError });
+
+// === LOCAL EVENTS ===
+
+registerEventTools(server, { shouldRegisterTool });
 
 // === START SERVER ===
 

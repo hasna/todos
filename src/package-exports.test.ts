@@ -114,7 +114,7 @@ describe("package subpath exports", () => {
       expect.arrayContaining(["TASK_NOT_FOUND", "VERSION_CONFLICT", "COMPLETION_BLOCKED"]),
     );
     expect(manifest.jsonOutputs.contracts.map((contract) => contract.id)).toEqual(
-      expect.arrayContaining(["task", "project", "agent", "template", "task_list", "comment", "checkpoint", "dispatch", "audit_history", "status_summary", "structured_error", "api_error"]),
+      expect.arrayContaining(["task", "project", "agent", "template", "task_list", "comment", "checkpoint", "dispatch", "audit_history", "local_event", "status_summary", "structured_error", "api_error"]),
     );
     expect(manifest.jsonOutputs.generatedAt).toBe(manifest.generatedAt);
     expect(TODOS_ERROR_CODES).toHaveLength(manifest.errorCodes.length);

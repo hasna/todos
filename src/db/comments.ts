@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import type { CreateCommentInput, TaskComment } from "../types/index.js";
 import { TaskNotFoundError } from "../types/index.js";
 import { getDatabase, now, uuid } from "./database.js";
+import { recordLocalEvent } from "./events.js";
 import { getTask } from "./tasks.js";
 
 export function addComment(
@@ -11,7 +12,8 @@ export function addComment(
   const d = db || getDatabase();
 
   // Verify task exists
-  if (!getTask(input.task_id, d)) {
+  const task = getTask(input.task_id, d);
+  if (!task) {
     throw new TaskNotFoundError(input.task_id);
   }
 
@@ -33,7 +35,19 @@ export function addComment(
     ],
   );
 
-  return getComment(id, d)!;
+  const comment = getComment(id, d)!;
+  recordLocalEvent({
+    event_type: `comment.${comment.type}.created`,
+    entity_type: "comment",
+    entity_id: comment.id,
+    task_id: comment.task_id,
+    project_id: task.project_id,
+    plan_id: task.plan_id,
+    agent_id: comment.agent_id,
+    data: { type: comment.type, progress_pct: comment.progress_pct },
+    created_at: timestamp,
+  }, d);
+  return comment;
 }
 
 export function logProgress(
@@ -73,11 +87,36 @@ export function updateComment(
   if (!comment) {
     throw new Error(`Comment not found: ${id}`);
   }
+  const task = getTask(comment.task_id, d);
+  recordLocalEvent({
+    event_type: "comment.updated",
+    entity_type: "comment",
+    entity_id: comment.id,
+    task_id: comment.task_id,
+    project_id: task?.project_id ?? null,
+    plan_id: task?.plan_id ?? null,
+    agent_id: comment.agent_id,
+    data: { type: comment.type },
+  }, d);
   return comment;
 }
 
 export function deleteComment(id: string, db?: Database): boolean {
   const d = db || getDatabase();
+  const comment = getComment(id, d);
   const result = d.run("DELETE FROM task_comments WHERE id = ?", [id]);
+  if (result.changes > 0 && comment) {
+    const task = getTask(comment.task_id, d);
+    recordLocalEvent({
+      event_type: "comment.deleted",
+      entity_type: "comment",
+      entity_id: id,
+      task_id: comment.task_id,
+      project_id: task?.project_id ?? null,
+      plan_id: task?.plan_id ?? null,
+      agent_id: comment.agent_id,
+      data: { type: comment.type },
+    }, d);
+  }
   return result.changes > 0;
 }

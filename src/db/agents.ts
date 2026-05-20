@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { Agent, AgentConflictError, AgentRow, AgentStatus, RegisterAgentInput } from "../types/index.js";
 import { getDatabase, now } from "./database.js";
+import { recordLocalEvent } from "./events.js";
 import {
   InvalidAgentNameError,
   normalizeAgentNameInput,
@@ -138,7 +139,16 @@ export function registerAgent(input: RegisterAgentInput, db?: Database): Agent |
     }
     params.push(existing.id);
     d.run(`UPDATE agents SET ${updates.join(", ")} WHERE id = ?`, params);
-    return getAgent(existing.id, d)!;
+    const agent = getAgent(existing.id, d)!;
+    recordLocalEvent({
+      event_type: sameSession ? "agent.heartbeat" : "agent.registered",
+      entity_type: "agent",
+      entity_id: agent.id,
+      agent_id: agent.id,
+      project_id: agent.active_project_id,
+      data: { name: agent.name, reused: true, force: input.force === true },
+    }, d);
+    return agent;
   }
 
   const id = shortUuid();
@@ -155,7 +165,17 @@ export function registerAgent(input: RegisterAgentInput, db?: Database): Agent |
      input.session_id || null, input.working_dir || null, input.project_id && input.session_id ? input.project_id : null],
   );
 
-  return getAgent(id, d)!;
+  const agent = getAgent(id, d)!;
+  recordLocalEvent({
+    event_type: "agent.registered",
+    entity_type: "agent",
+    entity_id: agent.id,
+    agent_id: agent.id,
+    project_id: agent.active_project_id,
+    data: { name: agent.name, role: agent.role },
+    created_at: timestamp,
+  }, d);
+  return agent;
 }
 
 export function isAgentConflict(result: Agent | AgentConflictError): result is AgentConflictError {
@@ -196,6 +216,14 @@ export function releaseAgent(id: string, session_id?: string, db?: Database): bo
 
   const epoch = new Date(0).toISOString();
   d.run("UPDATE agents SET session_id = NULL, last_seen_at = ? WHERE id = ?", [epoch, id]);
+  recordLocalEvent({
+    event_type: "agent.released",
+    entity_type: "agent",
+    entity_id: id,
+    agent_id: id,
+    project_id: agent.active_project_id,
+    data: { name: agent.name },
+  }, d);
   return true;
 }
 
@@ -232,6 +260,16 @@ export function listAgents(opts?: { include_archived?: boolean } | Database, db?
 export function updateAgentActivity(id: string, db?: Database): void {
   const d = db || getDatabase();
   d.run("UPDATE agents SET last_seen_at = ? WHERE id = ?", [now(), id]);
+  const agent = getAgent(id, d);
+  if (!agent) return;
+  recordLocalEvent({
+    event_type: "agent.heartbeat",
+    entity_type: "agent",
+    entity_id: id,
+    agent_id: id,
+    project_id: agent.active_project_id,
+    data: { name: agent.name },
+  }, d);
 }
 
 export function updateAgent(
@@ -303,27 +341,70 @@ export function updateAgent(
 
   params.push(id);
   d.run(`UPDATE agents SET ${sets.join(", ")} WHERE id = ?`, params);
-  return getAgent(id, d)!;
+  const updated = getAgent(id, d)!;
+  recordLocalEvent({
+    event_type: "agent.updated",
+    entity_type: "agent",
+    entity_id: id,
+    agent_id: id,
+    project_id: updated.active_project_id,
+    data: { changed_fields: Object.keys(input), name: updated.name },
+  }, d);
+  return updated;
 }
 
 /** Soft-delete: archives the agent instead of removing it. Tasks referencing this agent are preserved. */
 export function deleteAgent(id: string, db?: Database): boolean {
   const d = db || getDatabase();
-  return d.run("UPDATE agents SET status = 'archived', last_seen_at = ? WHERE id = ?", [now(), id]).changes > 0;
+  const agent = getAgent(id, d);
+  const archived = d.run("UPDATE agents SET status = 'archived', last_seen_at = ? WHERE id = ?", [now(), id]).changes > 0;
+  if (archived) {
+    recordLocalEvent({
+      event_type: "agent.archived",
+      entity_type: "agent",
+      entity_id: id,
+      agent_id: id,
+      project_id: agent?.active_project_id ?? null,
+      data: { name: agent?.name ?? null },
+    }, d);
+  }
+  return archived;
 }
 
 /** Archive an agent (soft delete). */
 export function archiveAgent(id: string, db?: Database): Agent | null {
   const d = db || getDatabase();
   d.run("UPDATE agents SET status = 'archived', last_seen_at = ? WHERE id = ?", [now(), id]);
-  return getAgent(id, d);
+  const agent = getAgent(id, d);
+  if (agent) {
+    recordLocalEvent({
+      event_type: "agent.archived",
+      entity_type: "agent",
+      entity_id: id,
+      agent_id: id,
+      project_id: agent.active_project_id,
+      data: { name: agent.name },
+    }, d);
+  }
+  return agent;
 }
 
 /** Restore an archived agent. */
 export function unarchiveAgent(id: string, db?: Database): Agent | null {
   const d = db || getDatabase();
   d.run("UPDATE agents SET status = 'active', last_seen_at = ? WHERE id = ?", [now(), id]);
-  return getAgent(id, d);
+  const agent = getAgent(id, d);
+  if (agent) {
+    recordLocalEvent({
+      event_type: "agent.unarchived",
+      entity_type: "agent",
+      entity_id: id,
+      agent_id: id,
+      project_id: agent.active_project_id,
+      data: { name: agent.name },
+    }, d);
+  }
+  return agent;
 }
 
 /** Get direct reports of an agent. */

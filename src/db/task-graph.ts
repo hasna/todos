@@ -9,6 +9,7 @@ import {
   TaskNotFoundError,
 } from "../types/index.js";
 import { getDatabase, now } from "./database.js";
+import { recordLocalEvent } from "./events.js";
 import { createTask, getTask } from "./task-crud.js";
 
 // Dependencies
@@ -29,10 +30,23 @@ export function addDependency(
     throw new DependencyCycleError(taskId, dependsOn);
   }
 
-  d.run(
+  const result = d.run(
     "INSERT OR IGNORE INTO task_dependencies (task_id, depends_on) VALUES (?, ?)",
     [taskId, dependsOn],
   );
+  if (result.changes > 0) {
+    const task = getTask(taskId, d);
+    recordLocalEvent({
+      event_type: "dependency.created",
+      entity_type: "dependency",
+      entity_id: `${taskId}:${dependsOn}`,
+      task_id: taskId,
+      project_id: task?.project_id ?? null,
+      plan_id: task?.plan_id ?? null,
+      agent_id: task?.assigned_to || task?.agent_id || null,
+      data: { depends_on: dependsOn },
+    }, d);
+  }
 }
 
 export function removeDependency(
@@ -45,6 +59,19 @@ export function removeDependency(
     "DELETE FROM task_dependencies WHERE task_id = ? AND depends_on = ?",
     [taskId, dependsOn],
   );
+  if (result.changes > 0) {
+    const task = getTask(taskId, d);
+    recordLocalEvent({
+      event_type: "dependency.deleted",
+      entity_type: "dependency",
+      entity_id: `${taskId}:${dependsOn}`,
+      task_id: taskId,
+      project_id: task?.project_id ?? null,
+      plan_id: task?.plan_id ?? null,
+      agent_id: task?.assigned_to || task?.agent_id || null,
+      data: { depends_on: dependsOn },
+    }, d);
+  }
   return result.changes > 0;
 }
 
@@ -189,7 +216,21 @@ export function moveTask(
   params.push(taskId);
   d.run(`UPDATE tasks SET ${sets.join(", ")} WHERE id = ?`, params);
 
-  return getTask(taskId, d)!;
+  const moved = getTask(taskId, d)!;
+  recordLocalEvent({
+    event_type: "task.moved",
+    entity_type: "task",
+    entity_id: taskId,
+    task_id: taskId,
+    project_id: moved.project_id,
+    plan_id: moved.plan_id,
+    agent_id: moved.assigned_to || moved.agent_id || null,
+    data: {
+      from: { task_list_id: task.task_list_id, project_id: task.project_id, plan_id: task.plan_id },
+      to: target,
+    },
+  }, d);
+  return moved;
 }
 
 // Internal helper — cycle detection via BFS
