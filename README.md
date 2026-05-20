@@ -17,6 +17,30 @@ npm install -g @hasna/todos
 todos --help
 ```
 
+### Agent Goal Plans
+
+Codex `/goal`, Claude Code, and other local agents can persist an objective as a
+local plan with generated tasks, progress comments, verification commands, and
+completion evidence:
+
+```bash
+todos --json goal \
+  --create "Ship the landing page fixes" \
+  --tool codex \
+  --task "Update package install copy" \
+  --task "Run landing page tests" \
+  --success "package is @hasna/todos" \
+  --verify "bun test"
+
+todos goal --progress <plan-id> --step 0 --message "Implementation started" --pct 25
+todos --json goal --complete <plan-id> --command "bun test" --test-results "pass"
+```
+
+The same contract is available through MCP tools: `create_goal_plan`,
+`get_goal_plan`, `record_goal_progress`, and `complete_goal_plan`. Everything is
+stored in the local SQLite database; the OSS package does not call hosted
+services for goal execution.
+
 ## MCP Server
 
 ```bash

@@ -6,6 +6,7 @@ import { addComment } from "./db/comments.js";
 import { upsertCheckpoint } from "./db/checkpoints.js";
 import { closeDatabase, getDatabase, resetDatabase } from "./db/database.js";
 import { createDispatch } from "./db/dispatches.js";
+import { createGoalPlan } from "./db/goal-contracts.js";
 import { registerAgent } from "./db/agents.js";
 import { createProject } from "./db/projects.js";
 import { getStatus } from "./db/tasks.js";
@@ -61,6 +62,7 @@ describe("stable JSON contracts", () => {
       "project",
       "agent",
       "template",
+      "goal_plan",
       "task_list",
       "comment",
       "checkpoint",
@@ -111,6 +113,14 @@ describe("stable JSON contracts", () => {
       project_id: project.id,
       metadata: { fixture: true },
     }, db);
+    const goal = createGoalPlan({
+      objective: "Verify contracts",
+      tool: "codex",
+      project_id: project.id,
+      success_criteria: ["all fixtures validate"],
+      verification_commands: ["bun test src/json-contracts.test.ts"],
+      tasks: [{ title: "Validate goal contract", priority: "high" }],
+    }, db);
     const comment = addComment({
       task_id: task.id,
       agent_id: typeof agent === "object" && "id" in agent ? agent.id : undefined,
@@ -139,6 +149,7 @@ describe("stable JSON contracts", () => {
     expectValid("task", task);
     expectValid("agent", agent);
     expectValid("template", template);
+    expectValid("goal_plan", goal);
     expectValid("comment", comment);
     expectValid("checkpoint", checkpoint);
     expectValid("dispatch", dispatch);

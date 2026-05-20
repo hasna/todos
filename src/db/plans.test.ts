@@ -59,6 +59,16 @@ describe("createPlan", () => {
     const plan = createPlan({ name: "Plan A", project_id: project.id }, db);
     expect(plan.project_id).toBe(project.id);
   });
+
+  it("should store metadata for agent-native plan contracts", () => {
+    const plan = createPlan({
+      name: "Goal plan",
+      metadata: { _goal: { objective: "Ship it", status: "running" } },
+    }, db);
+
+    expect(plan.metadata).toEqual({ _goal: { objective: "Ship it", status: "running" } });
+    expect(getPlan(plan.id, db)!.metadata).toEqual(plan.metadata);
+  });
 });
 
 describe("getPlan", () => {
@@ -147,12 +157,13 @@ describe("updatePlan", () => {
     const plan = createPlan({ name: "Plan" }, db);
     const updated = updatePlan(
       plan.id,
-      { name: "Updated", description: "A description", status: "completed" },
+      { name: "Updated", description: "A description", status: "completed", metadata: { done: true } },
       db,
     );
     expect(updated.name).toBe("Updated");
     expect(updated.description).toBe("A description");
     expect(updated.status).toBe("completed");
+    expect(updated.metadata).toEqual({ done: true });
   });
 
   it("should update updated_at timestamp", () => {

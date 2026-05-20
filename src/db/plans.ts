@@ -3,14 +3,23 @@ import type { CreatePlanInput, Plan, UpdatePlanInput } from "../types/index.js";
 import { PlanNotFoundError } from "../types/index.js";
 import { getDatabase, now, uuid } from "./database.js";
 
+type PlanRow = Omit<Plan, "metadata"> & { metadata?: string | null };
+
+function rowToPlan(row: PlanRow): Plan {
+  return {
+    ...row,
+    metadata: row.metadata ? JSON.parse(row.metadata) as Record<string, unknown> : {},
+  };
+}
+
 export function createPlan(input: CreatePlanInput, db?: Database): Plan {
   const d = db || getDatabase();
   const id = uuid();
   const timestamp = now();
 
   d.run(
-    `INSERT INTO plans (id, project_id, task_list_id, agent_id, name, description, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO plans (id, project_id, task_list_id, agent_id, name, description, status, metadata, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.project_id || null,
@@ -19,6 +28,7 @@ export function createPlan(input: CreatePlanInput, db?: Database): Plan {
       input.name,
       input.description || null,
       input.status || "active",
+      JSON.stringify(input.metadata || {}),
       timestamp,
       timestamp,
     ],
@@ -29,8 +39,8 @@ export function createPlan(input: CreatePlanInput, db?: Database): Plan {
 
 export function getPlan(id: string, db?: Database): Plan | null {
   const d = db || getDatabase();
-  const row = d.query("SELECT * FROM plans WHERE id = ?").get(id) as Plan | null;
-  return row;
+  const row = d.query("SELECT * FROM plans WHERE id = ?").get(id) as PlanRow | null;
+  return row ? rowToPlan(row) : null;
 }
 
 export function listPlans(projectId?: string, db?: Database): Plan[] {
@@ -38,11 +48,13 @@ export function listPlans(projectId?: string, db?: Database): Plan[] {
   if (projectId) {
     return d
       .query("SELECT * FROM plans WHERE project_id = ? ORDER BY created_at DESC")
-      .all(projectId) as Plan[];
+      .all(projectId)
+      .map((row) => rowToPlan(row as PlanRow));
   }
   return d
     .query("SELECT * FROM plans ORDER BY created_at DESC")
-    .all() as Plan[];
+    .all()
+    .map((row) => rowToPlan(row as PlanRow));
 }
 
 export function updatePlan(
@@ -76,6 +88,10 @@ export function updatePlan(
   if (input.agent_id !== undefined) {
     sets.push("agent_id = ?");
     params.push(input.agent_id);
+  }
+  if (input.metadata !== undefined) {
+    sets.push("metadata = ?");
+    params.push(JSON.stringify(input.metadata));
   }
 
   params.push(id);

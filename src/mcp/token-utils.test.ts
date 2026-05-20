@@ -22,6 +22,12 @@ describe("MCP token utilities", () => {
     expect(shouldRegisterToolForProfile("create_webhook", "full", undefined)).toBe(true);
   });
 
+  it("exposes goal tools to standard agent profiles", () => {
+    expect(shouldRegisterToolForProfile("create_goal_plan", "standard", undefined)).toBe(true);
+    expect(shouldRegisterToolForProfile("complete_goal_plan", "agent", undefined)).toBe(true);
+    expect(shouldRegisterToolForProfile("create_goal_plan", "minimal", undefined)).toBe(false);
+  });
+
   it("keeps the minimal profile small enough for agent startup", () => {
     expect(CORE_MCP_TOOLS.size).toBeLessThanOrEqual(20);
     expect(CORE_MCP_TOOLS.has("create_task")).toBe(true);

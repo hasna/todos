@@ -18,6 +18,7 @@ The stable contracts cover these object IDs:
 - `project`
 - `agent`
 - `template`
+- `goal_plan`
 - `task_list`
 - `comment`
 - `checkpoint`
@@ -53,3 +54,15 @@ Two error shapes are stable:
 New machine-readable fields may be added to either error object. Existing
 clients should keep displaying the string message and use stable `code` values
 when present.
+
+## Goal Plans
+
+The `goal_plan` contract is the local, agent-native shape for Codex
+`/goal`-style execution and equivalent Claude Code workflows. It records the
+objective, generated local tasks, progress comments, expected verification
+commands, captured verification evidence, and completion semantics in SQLite.
+
+The OSS package does not call hosted services for this contract. CLI, MCP, and
+SDK callers should treat `goal_plan.plan_id` as the stable local plan id and
+should inspect `goal_plan.tasks` plus `goal_plan.completion_semantics` before
+marking an objective done.

@@ -265,6 +265,7 @@ export function ensureSchema(db: Database): void {
   // Plans
   ensureColumn("plans", "task_list_id", "TEXT");
   ensureColumn("plans", "agent_id", "TEXT");
+  ensureColumn("plans", "metadata", "TEXT DEFAULT '{}'");
 
   // Templates
   ensureColumn("task_templates", "variables", "TEXT DEFAULT '[]'");

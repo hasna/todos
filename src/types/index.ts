@@ -102,6 +102,7 @@ export interface Plan {
   name: string;
   description: string | null;
   status: PlanStatus;
+  metadata: Record<string, unknown>;
   created_at: string;
   updated_at: string;
 }
@@ -113,6 +114,7 @@ export interface CreatePlanInput {
   agent_id?: string;
   description?: string;
   status?: PlanStatus;
+  metadata?: Record<string, unknown>;
 }
 
 export interface UpdatePlanInput {
@@ -121,6 +123,77 @@ export interface UpdatePlanInput {
   status?: PlanStatus;
   task_list_id?: string;
   agent_id?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export type GoalExecutionStatus = "planning" | "running" | "blocked" | "completed" | "failed" | "cancelled";
+
+export interface GoalVerificationEvidence {
+  commands?: string[];
+  test_results?: string;
+  files_changed?: string[];
+  commit_hash?: string;
+  notes?: string;
+}
+
+export interface GoalPlanStepInput {
+  title: string;
+  description?: string;
+  priority?: TaskPriority;
+  tags?: string[];
+  acceptance_criteria?: string[];
+  verification_commands?: string[];
+}
+
+export interface CreateGoalPlanInput {
+  objective: string;
+  name?: string;
+  project_id?: string;
+  task_list_id?: string;
+  agent_id?: string;
+  tool?: "codex" | "claude-code" | "takumi" | string;
+  success_criteria?: string[];
+  verification_commands?: string[];
+  tasks?: GoalPlanStepInput[];
+}
+
+export interface GoalProgressInput {
+  message: string;
+  agent_id?: string;
+  session_id?: string;
+  task_id?: string;
+  step_index?: number;
+  progress_pct?: number;
+  status?: GoalExecutionStatus;
+}
+
+export interface CompleteGoalPlanInput {
+  status?: Extract<GoalExecutionStatus, "completed" | "failed" | "cancelled">;
+  agent_id?: string;
+  evidence?: GoalVerificationEvidence;
+}
+
+export interface GoalPlanContract {
+  id: string;
+  plan_id: string;
+  objective: string;
+  status: GoalExecutionStatus;
+  tool: string | null;
+  project_id: string | null;
+  task_list_id: string | null;
+  agent_id: string | null;
+  plan: Plan;
+  tasks: Task[];
+  success_criteria: string[];
+  verification_commands: string[];
+  verification_evidence: GoalVerificationEvidence | null;
+  completion_semantics: {
+    requires_all_tasks_completed: boolean;
+    requires_verification_evidence: boolean;
+    completed_at: string | null;
+  };
+  created_at: string;
+  updated_at: string;
 }
 
 // Machine

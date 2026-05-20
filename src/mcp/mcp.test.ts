@@ -12,6 +12,7 @@ import { registerTaskRelTools } from "./tools/task-rel-tools.js";
 import { registerTaskAdvTools } from "./tools/task-adv-tools.js";
 import { registerTaskAutoTools } from "./tools/task-auto-tools.js";
 import { registerAgentTools } from "./tools/agents.js";
+import { registerGoalTools } from "./tools/goals.js";
 
 // These tests verify the core operations that the MCP server wraps.
 // The MCP server itself uses stdio transport which is harder to test in unit tests.
@@ -267,6 +268,34 @@ describe("MCP tool wrappers", () => {
 
     const result = await callCapturedTool(advTools, "get_comments", { task_id: task.id });
     expect(result.content[0]!.text).toContain("Alias comment body");
+  });
+
+  it("goal tools expose local /goal contracts as JSON", async () => {
+    const tools = captureTools(registerGoalTools);
+
+    const created = await callCapturedTool(tools, "create_goal_plan", {
+      objective: "MCP goal",
+      tool: "claude-code",
+      success_criteria: ["task created"],
+      verification_commands: ["bun test"],
+      tasks: [{ title: "MCP goal task", priority: "high" }],
+    });
+    const goal = JSON.parse(created.content[0]!.text);
+    expect(goal.objective).toBe("MCP goal");
+    expect(goal.tasks).toHaveLength(1);
+
+    await callCapturedTool(tools, "record_goal_progress", {
+      plan_id: goal.plan_id,
+      step_index: 0,
+      message: "working",
+      progress_pct: 25,
+    });
+
+    const completed = await callCapturedTool(tools, "complete_goal_plan", {
+      plan_id: goal.plan_id,
+      evidence: { commands: ["bun test"], test_results: "pass" },
+    });
+    expect(JSON.parse(completed.content[0]!.text).status).toBe("completed");
   });
 
   it("search_tasks wrapper calls the search library", async () => {

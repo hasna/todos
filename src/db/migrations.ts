@@ -855,4 +855,9 @@ export const MIGRATIONS = [
   CREATE INDEX IF NOT EXISTS idx_api_keys_active ON api_keys(revoked_at, expires_at);
   INSERT OR IGNORE INTO _migrations (id) VALUES (50);
   `,
+  // Migration 51: Plan metadata for local goal execution contracts
+  `
+  ALTER TABLE plans ADD COLUMN metadata TEXT DEFAULT '{}';
+  INSERT OR IGNORE INTO _migrations (id) VALUES (51);
+  `,
 ];

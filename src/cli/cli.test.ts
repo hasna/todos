@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { getDatabase, closeDatabase, resetDatabase } from "../db/database.js";
 import { createTask } from "../db/tasks.js";
 
@@ -59,6 +62,74 @@ describe("CLI integration", () => {
     // Cleanup
     const { unlinkSync } = await import("node:fs");
     try { unlinkSync("/tmp/test-cli-todos.db"); } catch {}
+  });
+
+  it("should create and complete a goal contract from the CLI", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "todos-goal-cli-"));
+    const dbPath = join(tempDir, "todos.db");
+    try {
+      const createProc = Bun.spawn(
+        [
+          "bun",
+          "run",
+          "src/cli/index.tsx",
+          "--json",
+          "goal",
+          "--create",
+          "Ship CLI goal contract",
+          "--tool",
+          "codex",
+          "--task",
+          "Write tests",
+          "--success",
+          "tests pass",
+          "--verify",
+          "bun test",
+        ],
+        {
+          cwd: import.meta.dir + "/../..",
+          env: { ...process.env, TODOS_DB_PATH: dbPath, TODOS_AUTO_PROJECT: "false" },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      const createdStdout = await new Response(createProc.stdout).text();
+      const createdStderr = await new Response(createProc.stderr).text();
+      expect(await createProc.exited).toBe(0);
+      expect(createdStderr).toBe("");
+      const goal = JSON.parse(createdStdout);
+      expect(goal.objective).toBe("Ship CLI goal contract");
+      expect(goal.tasks).toHaveLength(1);
+
+      const completeProc = Bun.spawn(
+        [
+          "bun",
+          "run",
+          "src/cli/index.tsx",
+          "--json",
+          "goal",
+          "--complete",
+          goal.plan_id,
+          "--command",
+          "bun test",
+          "--test-results",
+          "pass",
+        ],
+        {
+          cwd: import.meta.dir + "/../..",
+          env: { ...process.env, TODOS_DB_PATH: dbPath, TODOS_AUTO_PROJECT: "false" },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      const completedStdout = await new Response(completeProc.stdout).text();
+      expect(await completeProc.exited).toBe(0);
+      const completed = JSON.parse(completedStdout);
+      expect(completed.status).toBe("completed");
+      expect(completed.verification_evidence.commands).toEqual(["bun test"]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("should run list command", async () => {

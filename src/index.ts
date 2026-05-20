@@ -167,6 +167,12 @@ export {
   updatePlan,
   deletePlan,
 } from "./db/plans.js";
+export {
+  createGoalPlan,
+  getGoalPlan,
+  recordGoalProgress,
+  completeGoalPlan,
+} from "./db/goal-contracts.js";
 
 // Comments
 export {
@@ -384,6 +390,13 @@ export type {
   CreatePlanInput,
   UpdatePlanInput,
   PlanStatus,
+  GoalExecutionStatus,
+  GoalVerificationEvidence,
+  GoalPlanStepInput,
+  CreateGoalPlanInput,
+  GoalProgressInput,
+  CompleteGoalPlanInput,
+  GoalPlanContract,
   Session,
   CreateSessionInput,
   Agent,

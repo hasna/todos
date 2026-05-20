@@ -32,6 +32,24 @@ todos fail <id> --reason "Auth bug in middleware" --retry  # Auto-creates retry 
 - `todos stale` — are there any abandoned tasks to recover?
 - `GET /api/tasks/stream?agent_id=<name>` — subscribe to real-time task events (SSE)
 
+**Goal execution contracts:**
+```bash
+todos --json goal --create "Implement the requested change" \
+  --tool claude-code \
+  --task "Read the code path" \
+  --task "Patch and test" \
+  --success "tests pass" \
+  --verify "bun test"
+
+todos goal --progress <plan-id> --step 1 --message "Tests are running" --pct 70
+todos --json goal --complete <plan-id> --command "bun test" --test-results "pass"
+```
+
+MCP tools expose the same local SQLite contract as `create_goal_plan`,
+`get_goal_plan`, `record_goal_progress`, and `complete_goal_plan`. Use these
+when mapping a Claude Code plan or a Codex `/goal` objective to concrete tasks
+and verification evidence.
+
 **MCP session start (one call instead of four):**
 ```
 bootstrap(agent_id: "your-id")   # Returns: your active task, next claimable, health summary + as_of timestamp

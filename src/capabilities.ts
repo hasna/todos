@@ -216,6 +216,28 @@ function buildCapabilities(version: string): TodosCapability[] {
       outputSchema: objectSchema,
     }),
     capability(version, {
+      id: "mcp.goal-plan",
+      kind: "mcp",
+      name: "create_goal_plan",
+      description: "Create and inspect local /goal-style execution contracts for Codex, Claude Code, and other agent-native tools.",
+      tags: ["mcp", "goal", "plans", "agents", "local"],
+      docsPath: "docs/json-contracts.md#goal-plans",
+      stability: "stable",
+      inputSchema: {
+        type: "object",
+        properties: {
+          objective: { type: "string" },
+          tool: { type: "string" },
+          tasks: { type: "array", items: { type: "object", additionalProperties: true } },
+          success_criteria: { type: "array", items: { type: "string" } },
+          verification_commands: { type: "array", items: { type: "string" } },
+        },
+        required: ["objective"],
+        additionalProperties: true,
+      },
+      outputSchema: objectSchema,
+    }),
+    capability(version, {
       id: "server.local-api",
       kind: "server",
       name: "todos-serve",

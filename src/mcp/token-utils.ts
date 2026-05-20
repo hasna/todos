@@ -77,6 +77,12 @@ export const MCP_TOOL_GROUPS: Record<string, readonly string[]> = {
     "update_project",
     "update_task_list",
   ],
+  goals: [
+    "complete_goal_plan",
+    "create_goal_plan",
+    "get_goal_plan",
+    "record_goal_progress",
+  ],
   resources: [
     "add_task_dependency",
     "add_task_file",
@@ -186,9 +192,9 @@ export const MCP_TOOL_GROUPS: Record<string, readonly string[]> = {
 export const MCP_PROFILE_GROUPS: Record<string, readonly string[]> = {
   minimal: ["core"],
   core: ["core"],
-  standard: ["core", "tasks", "projects", "resources", "agents", "metadata"],
-  agent: ["core", "tasks", "projects", "resources"],
-  maintainer: ["core", "tasks", "projects", "resources", "agents", "metadata", "dispatch", "maintenance"],
+  standard: ["core", "tasks", "projects", "goals", "resources", "agents", "metadata"],
+  agent: ["core", "tasks", "projects", "goals", "resources"],
+  maintainer: ["core", "tasks", "projects", "goals", "resources", "agents", "metadata", "dispatch", "maintenance"],
 };
 
 function splitTokens(value: string | undefined): string[] {
