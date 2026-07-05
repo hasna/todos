@@ -233,6 +233,11 @@ export function getTaskRouteState(
   const explicitRouteEnabled = routeEnabledForTask(task, taskList);
   const tagOptIn = task.tags.includes("auto:route") || task.tags.includes("route:enabled");
   const routeEnabled = explicitRouteEnabled === undefined ? tagOptIn : explicitRouteEnabled;
+  // The fleet gates automation with the `no-auto` tag (the drain's invalid-path
+  // remediation adds it), so route_state must honour that tag as a deny signal —
+  // symmetric to the auto:route enable — otherwise an auto:route+no-auto task would
+  // be silently treated as a normal candidate.
+  const tagNoAuto = task.tags.includes("no-auto") || task.tags.includes("noauto") || task.tags.includes("no:auto");
   const projectKind = projectKindFromMetadata(task.metadata, taskList?.metadata);
   const locked = Boolean(task.locked_by && !isLockExpired(task.locked_at));
   const blockers = getBlockingDeps(task.id, d);
@@ -263,7 +268,7 @@ export function getTaskRouteState(
   const gates: TaskRouteGates = {
     route_enabled: routeEnabled,
     tag_opt_in: tagOptIn,
-    no_auto: automation.no_auto === true,
+    no_auto: automation.no_auto === true || tagNoAuto,
     manual: automation.manual === true,
     manual_required: automation.manual_required === true,
     requires_approval: requiresApproval,

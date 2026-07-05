@@ -177,16 +177,18 @@ describe("task route state", () => {
     expect(state.route_class).toBe("unroutable");
   });
 
-  test("auto:route plus no-auto is never a silent normal candidate", () => {
+  test("auto:route plus no-auto TAGS is never a silent normal candidate", () => {
+    // Real-world contradiction: the fleet gates with the no-auto TAG, not only
+    // automation metadata. auto:route must not override it.
     const task = createTask({
       title: "Contradictory tags",
-      tags: ["auto:route"],
-      metadata: { automation: { no_auto: true } },
+      tags: ["auto:route", "no-auto"],
     });
 
     const state = getTaskRouteState(task.id);
 
     expect(state.gates.tag_opt_in).toBe(true);
+    expect(state.gates.route_enabled).toBe(true);
     expect(state.gates.no_auto).toBe(true);
     expect(state.eligible).toBe(false);
     expect(state.reasons).toContain("no_auto");
