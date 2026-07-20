@@ -314,7 +314,7 @@ export function registerTaskCommands(program: Command) {
       opts.tags = opts.tags || opts.tag;
       opts.list = opts.list || opts.taskList;
 
-      // self_hosted cloud routing: create straight against <app>.hasna.xyz/v1.
+      // self_hosted cloud routing: create straight against <app-host>/v1.
       const cloud = getTodosCloudClient();
       if (cloud) {
         let task;
@@ -1155,7 +1155,7 @@ export function registerTaskCommands(program: Command) {
         handleError(new Error("Use either --working-dir or --clear-working-dir, not both."));
       }
 
-      // self_hosted cloud routing: PATCH straight against <app>.hasna.xyz/v1.
+      // self_hosted cloud routing: PATCH straight against <app-host>/v1.
       const cloud = getTodosCloudClient();
       if (cloud) {
         let task;
