@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { getDatabase, closeDatabase, resetDatabase } from "./database.js";
 import { registerAgent, isAgentConflict, releaseAgent, autoReleaseStaleAgents, getAgent, getAgentByName, listAgents, updateAgentActivity, updateAgent, deleteAgent, archiveAgent, unarchiveAgent, normalizeGeneratedAgentNames, InvalidAgentNameError } from "./agents.js";
 import { PREFERRED_AGENT_NAMES, suggestAgentNames } from "./agent-names.js";
+import { IdentityAliasAmbiguousError, listAgentAliases } from "./identity-mapping.js";
 
 let uniqueNameCounter = 0;
 
@@ -205,7 +206,7 @@ describe("updateAgent", () => {
 });
 
 describe("normalizeGeneratedAgentNames", () => {
-  it("should rename generic generated agents and update name references", () => {
+  it("should preserve generated labels as aliases without rewriting historical references", () => {
     const db = getDatabase();
     const timestamp = new Date().toISOString();
     db.run(
@@ -228,10 +229,14 @@ describe("normalizeGeneratedAgentNames", () => {
 
     const task = db.query("SELECT assigned_to, agent_id, locked_by FROM tasks WHERE id = ?").get("task0001") as { assigned_to: string; agent_id: string; locked_by: string };
     const comment = db.query("SELECT agent_id FROM task_comments WHERE id = ?").get("comment1") as { agent_id: string };
-    expect(task.assigned_to).toBe(renamed[0]!.new_name);
-    expect(comment.agent_id).toBe(renamed[0]!.new_name);
-    expect(task.agent_id).toBe(renamed[1]!.new_name);
-    expect(task.locked_by).toBe(renamed[2]!.new_name);
+    expect(task.assigned_to).toBe("agent-1");
+    expect(comment.agent_id).toBe("agent-1");
+    expect(task.agent_id).toBe("valeria-29");
+    expect(task.locked_by).toBe("busy-agent");
+    expect(renamed.every((item) => item.reference_updates === 0)).toBe(true);
+    expect(listAgentAliases("bad00001", db).map((alias) => alias.label)).toContain("agent-1");
+    expect(listAgentAliases("bad00002", db).map((alias) => alias.label)).toContain("valeria-29");
+    expect(listAgentAliases("bad00003", db).map((alias) => alias.label)).toContain("busy-agent");
   });
 
   it("should use distinct fallback names when the preferred pool is exhausted", () => {
@@ -413,7 +418,7 @@ describe("updateAgent — rename conflict check", () => {
   it("should reject rename to a name held by active agent", () => {
     const agentA = registerAgent({ name: "holdera" }) as any;
     const agentB = registerAgent({ name: "holderb" }) as any;
-    expect(() => updateAgent(agentB.id, { name: "holdera" })).toThrow("Cannot rename");
+    expect(() => updateAgent(agentB.id, { name: "holdera" })).toThrow(IdentityAliasAmbiguousError);
   });
 
   it("should allow rename to a free name", () => {
@@ -422,14 +427,16 @@ describe("updateAgent — rename conflict check", () => {
     expect(updated.name).toBe("totallynewname");
   });
 
-  it("should allow rename to a stale agent's name", () => {
+  it("should reject rename to a stale agent's label without evicting either record", () => {
     const db = getDatabase();
     const holder = registerAgent({ name: "staleholder" }) as any;
     const staleTime = new Date(Date.now() - 31 * 60 * 1000).toISOString();
     db.run("UPDATE agents SET last_seen_at = ? WHERE id = ?", [staleTime, holder.id]);
     const agent = registerAgent({ name: "wantsrename" }) as any;
-    const updated = updateAgent(agent.id, { name: "staleholder" });
-    expect(updated.name).toBe("staleholder");
+    expect(() => updateAgent(agent.id, { name: "staleholder" })).toThrow(IdentityAliasAmbiguousError);
+    expect(getAgent(holder.id)?.name).toBe("staleholder");
+    expect(getAgent(agent.id)?.name).toBe("wantsrename");
+    expect(db.query("SELECT name FROM agents WHERE name LIKE '%__evicted_%'").all()).toEqual([]);
   });
 });
 

@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { Agent } from "../types/index.js";
 import { now } from "./database.js";
+import { recordAgentAlias } from "./identity-mapping.js";
 
 export class InvalidAgentNameError extends Error {
   readonly suggestions: string[];
@@ -297,45 +298,6 @@ export function validateAgentName(name: string, existingNames: Iterable<string> 
   return normalized;
 }
 
-function tableHasColumn(db: Database, table: string, column: string): boolean {
-  try {
-    return (db.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).some((row) => row.name === column);
-  } catch {
-    return false;
-  }
-}
-
-function updateReferences(db: Database, oldName: string, newName: string): number {
-  const refs: Array<[string, string]> = [
-    ["tasks", "assigned_to"],
-    ["tasks", "agent_id"],
-    ["tasks", "locked_by"],
-    ["tasks", "assigned_by"],
-    ["plans", "agent_id"],
-    ["sessions", "agent_id"],
-    ["task_comments", "agent_id"],
-    ["task_history", "agent_id"],
-    ["webhooks", "agent_id"],
-    ["task_files", "agent_id"],
-    ["task_time_logs", "agent_id"],
-    ["task_watchers", "agent_id"],
-    ["task_checkpoints", "agent_id"],
-    ["task_heartbeats", "agent_id"],
-    ["project_agent_roles", "agent_id"],
-  ];
-
-  let changed = 0;
-  for (const [table, column] of refs) {
-    if (!tableHasColumn(db, table, column)) continue;
-    try {
-      changed += db.run(`UPDATE ${table} SET ${column} = ? WHERE LOWER(${column}) = ?`, [newName, oldName]).changes;
-    } catch {
-      // Best-effort reference cleanup; schema may vary across older DBs.
-    }
-  }
-  return changed;
-}
-
 export interface AgentNameNormalization {
   id: string;
   old_name: string;
@@ -361,13 +323,16 @@ export function normalizeGeneratedAgentNames(db: Database): AgentNameNormalizati
     existing.delete(oldName);
     existing.add(replacement);
 
-    db.run("UPDATE agents SET name = ?, last_seen_at = ? WHERE id = ?", [replacement, now(), agent.id]);
-    const referenceUpdates = updateReferences(db, oldName, replacement);
+    const rename = db.transaction(() => {
+      recordAgentAlias(agent.id, oldName, db);
+      db.run("UPDATE agents SET name = ?, last_seen_at = ? WHERE id = ?", [replacement, now(), agent.id]);
+    });
+    rename.immediate();
     renamed.push({
       id: agent.id,
       old_name: oldName,
       new_name: replacement,
-      reference_updates: referenceUpdates,
+      reference_updates: 0,
     });
   }
 
