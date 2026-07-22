@@ -74,8 +74,11 @@ describe("server image build context", () => {
 
     expect(buildspec).toContain("docker build --platform linux/arm64");
     expect(buildspec).toContain(
-      'docker run --rm --entrypoint bun "${IMAGE}" dist/server/index.js --version)" = 0.11.92',
+      'docker run --rm --entrypoint bun "${IMAGE}" dist/server/index.js --version)" = "${TODOS_PACKAGE_VERSION}"',
     );
+    expect(buildspec).toContain('export TODOS_PACKAGE_VERSION="$(jq -er');
+    expect(buildspec).toContain('org.opencontainers.image.version=${TODOS_PACKAGE_VERSION}');
+    expect(buildspec).toContain('-e TODOS_EXPECTED_VERSION="${TODOS_PACKAGE_VERSION}"');
     expect(buildspec).toContain('--build-arg "BUN_IMAGE=${BUN_IMAGE_OVERRIDE}"');
     expect(buildspec).toContain('BASE_IMAGE_ARCHIVE_VERSION');
     expect(buildspec).toContain('BASE_IMAGE_ARCHIVE_SHA256');
@@ -121,9 +124,10 @@ describe("server image build context", () => {
     expect(buildspec).toContain("wrong-postgres");
     expect(buildspec).toContain("bun dist/server/index.js migrate");
     expect(buildspec).toContain("scripts/container-http-smoke.ts");
-    expect(readFileSync(join(root, "scripts/container-http-smoke.ts"), "utf8")).toContain(
-      'versionPayload.version !== "0.11.92"',
-    );
+    const containerSmoke = readFileSync(join(root, "scripts/container-http-smoke.ts"), "utf8");
+    expect(containerSmoke).toContain('const expectedVersion = process.env.TODOS_EXPECTED_VERSION;');
+    expect(containerSmoke).toContain('TODOS_EXPECTED_VERSION must be a valid semver version');
+    expect(containerSmoke).toContain('versionPayload.version !== expectedVersion');
     expect(buildspec).not.toContain("terraform");
     expect(buildspec).not.toContain("update-service");
   });
