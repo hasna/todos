@@ -84,6 +84,12 @@ describe("server image build context", () => {
     expect(buildspec).toContain('--build-arg "BUN_IMAGE=${BUN_IMAGE_OVERRIDE}"');
     expect(buildspec).toContain('BASE_IMAGE_ARCHIVE_VERSION');
     expect(buildspec).toContain('BASE_IMAGE_ARCHIVE_SHA256');
+    expect(buildspec).toContain('test -n "${SOURCE_ARCHIVE_SHA256:-}"');
+    expect(buildspec).toContain('[[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]');
+    expect(buildspec).toContain('[[ "${SOURCE_ARCHIVE_SHA256}" =~ ^[0-9a-f]{64}$ ]]');
+    expect(buildspec).toContain('[[ "${EXPECTED_SOURCE_TREE_SHA256}" =~ ^[0-9a-f]{64}$ ]]');
+    expect(buildspec).toContain('--arg archive_sha256 "${SOURCE_ARCHIVE_SHA256}"');
+    expect(buildspec).not.toContain('SOURCE_ARCHIVE_SHA256:-unknown');
     expect(buildspec).toContain('EXPECTED_SOURCE_TREE_SHA256');
     expect(buildspec).toContain('sha256sum --zero > /tmp/source-tree.manifest');
     expect(buildspec).toContain('ECR_REPOSITORY_NAME');
