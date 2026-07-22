@@ -94,6 +94,12 @@ describe("container HTTP smoke version contract", () => {
     expect(invalid.status).not.toBe(0);
     expect(invalid.output).toContain("TODOS_EXPECTED_VERSION must be a valid semver version");
 
+    for (const invalidPrerelease of ["0.11.96-01", "0.11.96-rc.01"]) {
+      const invalid = await runSmoke(invalidPrerelease);
+      expect(invalid.status).not.toBe(0);
+      expect(invalid.output).toContain("TODOS_EXPECTED_VERSION must be a valid semver version");
+    }
+
     const mismatchVersion = `${packageVersion.version}-mismatch`;
     const mismatch = await runSmoke(mismatchVersion);
     expect(mismatch.status).not.toBe(0);

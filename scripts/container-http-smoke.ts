@@ -1,12 +1,14 @@
 #!/usr/bin/env bun
 
+import { isStrictSemver } from "./semver.ts";
+
 const baseUrl = process.env.TODOS_V1_BASE_URL;
 const token = process.env.TODOS_V1_TOKEN;
 const expectedVersion = process.env.TODOS_EXPECTED_VERSION;
 if (!baseUrl) throw new Error("TODOS_V1_BASE_URL is required");
 if (!token) throw new Error("TODOS_V1_TOKEN is required");
 if (!expectedVersion) throw new Error("TODOS_EXPECTED_VERSION is required");
-if (!/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(expectedVersion)) {
+if (!isStrictSemver(expectedVersion)) {
   throw new Error("TODOS_EXPECTED_VERSION must be a valid semver version");
 }
 

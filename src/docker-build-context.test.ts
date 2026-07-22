@@ -76,9 +76,11 @@ describe("server image build context", () => {
     expect(buildspec).toContain(
       'docker run --rm --entrypoint bun "${IMAGE}" dist/server/index.js --version)" = "${TODOS_PACKAGE_VERSION}"',
     );
-    expect(buildspec).toContain('export TODOS_PACKAGE_VERSION="$(jq -er');
+    expect(buildspec).toContain('export TODOS_PACKAGE_VERSION="$(jq -er \'.version | strings\' package.json)"');
+    expect(buildspec).toContain('-v "$PWD/scripts/semver.ts:/tmp/semver.ts:ro" --entrypoint bun "${BUN_IMAGE_OVERRIDE}" /tmp/semver.ts "${TODOS_PACKAGE_VERSION}"');
     expect(buildspec).toContain('org.opencontainers.image.version=${TODOS_PACKAGE_VERSION}');
     expect(buildspec).toContain('-e TODOS_EXPECTED_VERSION="${TODOS_PACKAGE_VERSION}"');
+    expect(buildspec).toContain('-v "$PWD/scripts/semver.ts:/tmp/semver.ts:ro" --entrypoint bun "${IMAGE}" /tmp/container-http-smoke.ts');
     expect(buildspec).toContain('--build-arg "BUN_IMAGE=${BUN_IMAGE_OVERRIDE}"');
     expect(buildspec).toContain('BASE_IMAGE_ARCHIVE_VERSION');
     expect(buildspec).toContain('BASE_IMAGE_ARCHIVE_SHA256');
@@ -126,6 +128,7 @@ describe("server image build context", () => {
     expect(buildspec).toContain("scripts/container-http-smoke.ts");
     const containerSmoke = readFileSync(join(root, "scripts/container-http-smoke.ts"), "utf8");
     expect(containerSmoke).toContain('const expectedVersion = process.env.TODOS_EXPECTED_VERSION;');
+    expect(containerSmoke).toContain('import { isStrictSemver } from "./semver.ts";');
     expect(containerSmoke).toContain('TODOS_EXPECTED_VERSION must be a valid semver version');
     expect(containerSmoke).toContain('versionPayload.version !== expectedVersion');
     expect(buildspec).not.toContain("terraform");
