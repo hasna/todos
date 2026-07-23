@@ -37,9 +37,15 @@ export {
 export const IDENTITY_PROJECTION_CONTRACT = Object.freeze({
   name: "hasna.todos.agent-identity-projection/v1",
   version: 1,
+  foundation_repository: "hasna/identities",
+  foundation_pull_request: 14,
   foundation_contract: "hasna.identities.agent-identity/v1",
   foundation_version: 1,
-  foundation_commit: "53edcfbb7e5d10445ee9896f1d9f3e52014b1013",
+  foundation_commit: "557fc2228722b7505071cd08d2109906664637ee",
+  foundation_fixture_id: "hasna.identities.agent-identity/v1/conformance/1",
+  foundation_fixture_source_path: "docs/fixtures/agent-identity-v1.conformance.json",
+  foundation_fixture_local_path: "src/db/fixtures/agent-identity-v1.conformance.json",
+  foundation_fixture_sha256: "sha256:2d22e72b7315d0b06b3c67c71674cfd8c2dff552727eea00efb325f52c9420af",
   foundation_default_read_preference: "canonical_first",
   consumer_rollout_default_read_preference: "legacy_first",
   lease_fence_authority: "external Runtime Coordination",
@@ -63,7 +69,7 @@ function mappingId(): string {
 function normalizedRequired(value: string, field: string, lowercase = false): string {
   const normalized = value.trim();
   if (!normalized) throw new Error(`IDENTITY_SOURCE_LINEAGE_INVALID: ${field} is required`);
-  return lowercase ? normalized.toLowerCase() : normalized;
+  return lowercase ? normalized.toLocaleLowerCase("en-US") : normalized;
 }
 
 function normalizeLineage(source: IdentitySourceLineage): IdentitySourceLineage {
@@ -92,9 +98,18 @@ function sourceSubject(source: IdentitySourceLineage): string {
   ]);
 }
 
+type AgentIdentitySourceMappingRow = Omit<AgentIdentitySourceMapping, "evidence"> & { evidence: string };
+
+function mappingRowToSourceMapping(row: AgentIdentitySourceMappingRow): AgentIdentitySourceMapping {
+  return {
+    ...row,
+    evidence: JSON.parse(row.evidence || "{}") as Record<string, unknown>,
+  };
+}
+
 function currentSourceMappings(source: IdentitySourceLineage, db: Database): AgentIdentitySourceMapping[] {
   const normalized = normalizeLineage(source);
-  return db.query(`
+  const rows = db.query(`
     WITH lineage AS (
       SELECT * FROM agent_identity_source_mappings
       WHERE source_authority = ?
@@ -113,7 +128,8 @@ function currentSourceMappings(source: IdentitySourceLineage, db: Database): Age
     normalized.source_namespace,
     normalized.source_entity_type,
     normalized.source_record_id,
-  ) as AgentIdentitySourceMapping[];
+  ) as AgentIdentitySourceMappingRow[];
+  return rows.map(mappingRowToSourceMapping);
 }
 
 function ensureColumn(db: Database, table: string, column: string, type: string): void {
@@ -145,6 +161,7 @@ export function ensureAgentIdentitySchema(db: Database): void {
         source_entity_type TEXT NOT NULL CHECK(length(trim(source_entity_type)) > 0),
         source_record_id TEXT NOT NULL CHECK(length(trim(source_record_id)) > 0),
         observed_label TEXT,
+        evidence TEXT NOT NULL DEFAULT '{}',
         mapping_basis TEXT NOT NULL CHECK(mapping_basis IN ('authoritative', 'imported', 'candidate', 'name_similarity')),
         status TEXT NOT NULL CHECK(status IN ('active', 'retired', 'quarantined', 'revoked')),
         revision INTEGER NOT NULL CHECK(revision > 0),
@@ -155,6 +172,7 @@ export function ensureAgentIdentitySchema(db: Database): void {
       );
     `);
     ensureColumn(db, "agent_identity_source_mappings", "revision", "INTEGER NOT NULL DEFAULT 1");
+    ensureColumn(db, "agent_identity_source_mappings", "evidence", "TEXT NOT NULL DEFAULT '{}'");
     db.exec(`
       DROP INDEX IF EXISTS idx_agent_identity_source_active_unique;
       CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_identity_source_revision_unique
@@ -207,8 +225,9 @@ export function ensureAgentIdentitySchema(db: Database): void {
         SELECT RAISE(ABORT, 'IDENTITY_SOURCE_LINEAGE_IMMUTABLE');
       END;
 
-      CREATE TRIGGER IF NOT EXISTS trg_agent_identity_mapping_history_immutable
-      BEFORE UPDATE OF local_agent_id, observed_label, mapping_basis, status, revision, created_at
+      DROP TRIGGER IF EXISTS trg_agent_identity_mapping_history_immutable;
+      CREATE TRIGGER trg_agent_identity_mapping_history_immutable
+      BEFORE UPDATE OF local_agent_id, observed_label, evidence, mapping_basis, status, revision, created_at
         ON agent_identity_source_mappings
       BEGIN
         SELECT RAISE(ABORT, 'IDENTITY_MAPPING_HISTORY_IMMUTABLE');
@@ -280,6 +299,35 @@ function projectedObservedLabel(
   return current?.observed_label ?? null;
 }
 
+function normalizeEvidenceValue(value: unknown, path: string): unknown {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (Array.isArray(value)) return value.map((item, index) => normalizeEvidenceValue(item, `${path}[${index}]`));
+  if (typeof value === "object") {
+    const normalized: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      normalized[key] = normalizeEvidenceValue((value as Record<string, unknown>)[key], `${path}.${key}`);
+    }
+    return normalized;
+  }
+  throw new Error(`IDENTITY_EVIDENCE_INVALID: ${path} must contain JSON values`);
+}
+
+function projectedEvidence(
+  input: AgentIdentityMappingInput,
+  current: AgentIdentitySourceMapping | undefined,
+): Record<string, unknown> {
+  const candidate = input.evidence ?? current?.evidence ?? {};
+  if (candidate === null || Array.isArray(candidate) || typeof candidate !== "object") {
+    throw new Error("IDENTITY_EVIDENCE_INVALID: evidence must be an object");
+  }
+  return normalizeEvidenceValue(candidate, "evidence") as Record<string, unknown>;
+}
+
+function evidenceJson(evidence: Record<string, unknown>): string {
+  return JSON.stringify(evidence);
+}
+
 function appendProjectedIdentityMapping(
   input: AgentIdentityMappingInput,
   mappingBasis: ProjectedMappingBasis,
@@ -296,6 +344,7 @@ function appendProjectedIdentityMapping(
     const current = existing[0];
     const localAgentId = projectedLocalAgentId(input, current, identityId);
     const observedLabel = projectedObservedLabel(input, current);
+    const evidence = projectedEvidence(input, current);
 
     if (localAgentId && mappingBasis === "authoritative" && status === "active") {
       bindAgentIdentity(localAgentId, identityId, db);
@@ -308,6 +357,7 @@ function appendProjectedIdentityMapping(
       && current.identity_id === identityId
       && current.local_agent_id === localAgentId
       && current.observed_label === observedLabel
+      && evidenceJson(current.evidence) === evidenceJson(evidence)
       && current.mapping_basis === mappingBasis
       && current.status === status
     ) return current;
@@ -318,9 +368,9 @@ function appendProjectedIdentityMapping(
     db.run(`
       INSERT INTO agent_identity_source_mappings (
         id, local_agent_id, identity_id, source_authority, source_tenant_id, source_namespace,
-        source_entity_type, source_record_id, observed_label, mapping_basis, status, revision,
+        source_entity_type, source_record_id, observed_label, evidence, mapping_basis, status, revision,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       id,
       localAgentId,
@@ -331,13 +381,16 @@ function appendProjectedIdentityMapping(
       source.source_entity_type,
       source.source_record_id,
       observedLabel,
+      evidenceJson(evidence),
       mappingBasis,
       status,
       revision,
       createdAt,
       createdAt,
     ]);
-    return db.query("SELECT * FROM agent_identity_source_mappings WHERE id = ?").get(id) as AgentIdentitySourceMapping;
+    return mappingRowToSourceMapping(
+      db.query("SELECT * FROM agent_identity_source_mappings WHERE id = ?").get(id) as AgentIdentitySourceMappingRow,
+    );
   });
 
   try {
@@ -366,12 +419,14 @@ function lifecycleAction(
   identityId: string,
   localAgentId: string | null,
   observedLabel: string | null,
+  evidence: Record<string, unknown>,
 ): IdentityMappingLifecycleAction {
   if (!current) return "create";
   if (
     current.identity_id === identityId
     && current.local_agent_id === localAgentId
     && current.observed_label === observedLabel
+    && evidenceJson(current.evidence) === evidenceJson(evidence)
     && current.mapping_basis === mappingBasis
     && current.status === status
   ) return "unchanged";
@@ -418,6 +473,7 @@ function classifyProjected(
   const current = existing[0];
   const localAgentId = projectedLocalAgentId(input, current, identityId);
   const observedLabel = projectedObservedLabel(input, current);
+  const evidence = projectedEvidence(input, current);
   if (localAgentId) {
     const projected = agentIdentity(localAgentId, db);
     if (projected === undefined) return blocked("unmapped", "local_agent_missing");
@@ -426,13 +482,14 @@ function classifyProjected(
     }
   }
 
-  const action = lifecycleAction(current, mappingBasis, status, identityId, localAgentId, observedLabel);
+  const action = lifecycleAction(current, mappingBasis, status, identityId, localAgentId, observedLabel, evidence);
   return {
     ...input,
     ...source,
     status,
     local_agent_id: localAgentId,
     observed_label: observedLabel,
+    evidence,
     classification: "uniquely_mapped",
     mapping_id: current?.id ?? null,
     previous_mapping_id: current?.id ?? null,
@@ -447,12 +504,14 @@ function insertQuarantinedMapping(input: AgentIdentityMappingInput, db: Database
     const localAgentId = input.local_agent_id?.trim() || null;
     const identityId = input.identity_id?.trim() || null;
     const observedLabel = input.observed_label?.trim() || null;
+    const evidence = projectedEvidence(input, undefined);
+    const serializedEvidence = evidenceJson(evidence);
     const existing = db.query(`
     SELECT id FROM agent_identity_source_mappings
     WHERE source_authority = ? AND source_tenant_id = ? AND source_namespace = ?
       AND source_entity_type = ? AND source_record_id = ?
       AND mapping_basis = ? AND status = 'quarantined'
-      AND local_agent_id IS ? AND identity_id IS ? AND observed_label IS ?
+      AND local_agent_id IS ? AND identity_id IS ? AND observed_label IS ? AND evidence = ?
     ORDER BY created_at, id LIMIT 1
   `).get(
     source.source_authority,
@@ -464,6 +523,7 @@ function insertQuarantinedMapping(input: AgentIdentityMappingInput, db: Database
     localAgentId,
     identityId,
     observedLabel,
+    serializedEvidence,
   ) as { id: string } | null;
     if (existing) return existing.id;
 
@@ -472,9 +532,9 @@ function insertQuarantinedMapping(input: AgentIdentityMappingInput, db: Database
     db.run(`
     INSERT INTO agent_identity_source_mappings (
       id, local_agent_id, identity_id, source_authority, source_tenant_id, source_namespace,
-      source_entity_type, source_record_id, observed_label, mapping_basis, status, revision,
+      source_entity_type, source_record_id, observed_label, evidence, mapping_basis, status, revision,
       created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'quarantined', 1, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'quarantined', 1, ?, ?)
   `, [
     id,
     localAgentId,
@@ -485,6 +545,7 @@ function insertQuarantinedMapping(input: AgentIdentityMappingInput, db: Database
     source.source_entity_type,
     source.source_record_id,
     observedLabel,
+    serializedEvidence,
     input.mapping_basis,
     createdAt,
     createdAt,
@@ -703,6 +764,10 @@ function storeAgentAlias(
 
 export function recordAgentAlias(agentId: string, label: string, db: Database): AgentIdentityAlias {
   return storeAgentAlias(agentId, label, "historical", "active", db);
+}
+
+export function recordAgentAliasCandidate(agentId: string, label: string, db: Database): AgentIdentityAlias {
+  return storeAgentAlias(agentId, label, "candidate", "quarantined", db);
 }
 
 export function listAgentAliases(agentId: string, db: Database): AgentIdentityAlias[] {

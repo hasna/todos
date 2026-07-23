@@ -1245,6 +1245,7 @@ export const MIGRATIONS = [
     source_entity_type TEXT NOT NULL CHECK(length(trim(source_entity_type)) > 0),
     source_record_id TEXT NOT NULL CHECK(length(trim(source_record_id)) > 0),
     observed_label TEXT,
+    evidence TEXT NOT NULL DEFAULT '{}',
     mapping_basis TEXT NOT NULL CHECK(mapping_basis IN ('authoritative', 'imported', 'candidate', 'name_similarity')),
     status TEXT NOT NULL CHECK(status IN ('active', 'retired', 'quarantined', 'revoked')),
     revision INTEGER NOT NULL CHECK(revision > 0),
@@ -1303,7 +1304,7 @@ export const MIGRATIONS = [
   END;
 
   CREATE TRIGGER IF NOT EXISTS trg_agent_identity_mapping_history_immutable
-  BEFORE UPDATE OF local_agent_id, observed_label, mapping_basis, status, revision, created_at
+  BEFORE UPDATE OF local_agent_id, observed_label, evidence, mapping_basis, status, revision, created_at
     ON agent_identity_source_mappings
   BEGIN
     SELECT RAISE(ABORT, 'IDENTITY_MAPPING_HISTORY_IMMUTABLE');

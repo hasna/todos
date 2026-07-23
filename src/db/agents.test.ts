@@ -2,7 +2,9 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { getDatabase, closeDatabase, resetDatabase } from "./database.js";
 import { registerAgent, isAgentConflict, releaseAgent, autoReleaseStaleAgents, getAgent, getAgentByName, listAgents, updateAgentActivity, updateAgent, deleteAgent, archiveAgent, unarchiveAgent, normalizeGeneratedAgentNames, InvalidAgentNameError } from "./agents.js";
 import { PREFERRED_AGENT_NAMES, suggestAgentNames } from "./agent-names.js";
-import { IdentityAliasAmbiguousError, listAgentAliases } from "./identity-mapping.js";
+import { IdentityAliasAmbiguousError, listAgentAliases, resolveAgentIdentity } from "./identity-mapping.js";
+import { createTask, getNextTask, listTasks } from "./tasks.js";
+import { getAgentMetrics } from "./agent-metrics.js";
 
 let uniqueNameCounter = 0;
 
@@ -206,7 +208,81 @@ describe("updateAgent", () => {
 });
 
 describe("normalizeGeneratedAgentNames", () => {
-  it("should preserve generated labels as aliases without rewriting historical references", () => {
+  it("keeps historical assignments discoverable through task, queue, and metrics entry points without mutation", () => {
+    const db = getDatabase();
+    const timestamp = new Date().toISOString();
+    const agentId = "legacy01";
+    const historicalName = "agent-1";
+    db.run(
+      "INSERT INTO agents (id, name, created_at, last_seen_at) VALUES (?, ?, ?, ?)",
+      [agentId, historicalName, timestamp, timestamp],
+    );
+
+    const assigned = createTask({
+      title: "Historical assignment",
+      priority: "low",
+      assigned_to: historicalName,
+    }, db);
+    createTask({ title: "Unassigned competitor", priority: "critical" }, db);
+    createTask({
+      title: "Historical local-id metric",
+      status: "completed",
+      agent_id: agentId,
+    }, db);
+    const locked = createTask({
+      title: "Historical lock",
+      status: "in_progress",
+      assigned_to: historicalName,
+    }, db);
+    db.run("UPDATE tasks SET locked_by = ?, locked_at = ? WHERE id = ?", [historicalName, timestamp, locked.id]);
+    db.run(
+      "INSERT INTO task_comments (id, task_id, agent_id, content, created_at) VALUES (?, ?, ?, ?, ?)",
+      ["legacyc1", assigned.id, historicalName, "Historical progress", timestamp],
+    );
+
+    expect(listTasks({ assigned_to: historicalName }, db).map((task) => task.id)).toContain(assigned.id);
+    expect(getNextTask(historicalName, undefined, db)?.id).toBe(assigned.id);
+    expect(getAgentMetrics(historicalName, {}, db)?.tasks_completed).toBe(1);
+    const agentBefore = db.query("SELECT * FROM agents WHERE id = ?").get(agentId);
+
+    db.exec(`
+      CREATE TEMP TRIGGER reject_agent_name_rewrite
+      BEFORE UPDATE OF name ON agents
+      BEGIN SELECT RAISE(ABORT, 'agents.name mutation is forbidden'); END;
+
+      CREATE TEMP TRIGGER reject_task_reference_rewrite
+      BEFORE UPDATE OF assigned_to, agent_id, locked_by ON tasks
+      BEGIN SELECT RAISE(ABORT, 'historical task reference rewrite is forbidden'); END;
+
+      CREATE TEMP TRIGGER reject_comment_reference_rewrite
+      BEFORE UPDATE OF agent_id ON task_comments
+      BEGIN SELECT RAISE(ABORT, 'historical comment reference rewrite is forbidden'); END;
+    `);
+
+    const changesBefore = (db.query("SELECT total_changes() AS count").get() as { count: number }).count;
+    const planned = normalizeGeneratedAgentNames(db);
+    const changesAfter = (db.query("SELECT total_changes() AS count").get() as { count: number }).count;
+    expect(planned).toHaveLength(1);
+    expect(planned[0]!.old_name).toBe(historicalName);
+    expect(planned[0]!.new_name).not.toBe(historicalName);
+    expect(planned[0]!.applied).toBe(false);
+    expect(planned[0]!.disposition).toBe("candidate");
+    expect(planned[0]!.alias_kind).toBe("candidate");
+    expect(planned[0]!.status).toBe("quarantined");
+    expect(planned[0]!.name_updates).toBe(0);
+    expect(planned[0]!.reference_updates).toBe(0);
+
+    expect(getAgent(agentId, db)?.name).toBe(historicalName);
+    expect(db.query("SELECT * FROM agents WHERE id = ?").get(agentId)).toEqual(agentBefore);
+    expect(changesAfter - changesBefore).toBe(1);
+    expect(listTasks({ assigned_to: historicalName }, db).map((task) => task.id)).toContain(assigned.id);
+    expect(getNextTask(historicalName, undefined, db)?.id).toBe(assigned.id);
+    expect(getAgentMetrics(historicalName, {}, db)?.tasks_completed).toBe(1);
+    expect(db.query("SELECT locked_by FROM tasks WHERE id = ?").get(locked.id)).toEqual({ locked_by: historicalName });
+    expect(db.query("SELECT agent_id FROM task_comments WHERE id = ?").get("legacyc1")).toEqual({ agent_id: historicalName });
+  });
+
+  it("should retain generated labels and record only quarantined replacement candidates", () => {
     const db = getDatabase();
     const timestamp = new Date().toISOString();
     db.run(
@@ -222,10 +298,13 @@ describe("normalizeGeneratedAgentNames", () => {
       ["comment1", "task0001", "agent-1", "progress", timestamp],
     );
 
-    const renamed = normalizeGeneratedAgentNames(db);
-    expect(renamed).toHaveLength(3);
-    expect(renamed.map((item) => item.old_name)).toEqual(["agent-1", "valeria-29", "busy-agent"]);
-    expect(renamed.every((item) => !item.new_name.match(/-\d+$/))).toBe(true);
+    const planned = normalizeGeneratedAgentNames(db);
+    expect(planned).toHaveLength(3);
+    expect(planned.map((item) => item.old_name)).toEqual(["agent-1", "valeria-29", "busy-agent"]);
+    expect(planned.every((item) => !item.new_name.match(/-\d+$/))).toBe(true);
+    expect(planned.every((item) => item.applied === false)).toBe(true);
+    expect(planned.every((item) => item.disposition === "candidate")).toBe(true);
+    expect(planned.every((item) => item.name_updates === 0)).toBe(true);
 
     const task = db.query("SELECT assigned_to, agent_id, locked_by FROM tasks WHERE id = ?").get("task0001") as { assigned_to: string; agent_id: string; locked_by: string };
     const comment = db.query("SELECT agent_id FROM task_comments WHERE id = ?").get("comment1") as { agent_id: string };
@@ -233,10 +312,25 @@ describe("normalizeGeneratedAgentNames", () => {
     expect(comment.agent_id).toBe("agent-1");
     expect(task.agent_id).toBe("valeria-29");
     expect(task.locked_by).toBe("busy-agent");
-    expect(renamed.every((item) => item.reference_updates === 0)).toBe(true);
-    expect(listAgentAliases("bad00001", db).map((alias) => alias.label)).toContain("agent-1");
-    expect(listAgentAliases("bad00002", db).map((alias) => alias.label)).toContain("valeria-29");
-    expect(listAgentAliases("bad00003", db).map((alias) => alias.label)).toContain("busy-agent");
+    expect(planned.every((item) => item.reference_updates === 0)).toBe(true);
+    expect(db.query("SELECT id, name FROM agents ORDER BY id").all()).toEqual([
+      { id: "bad00001", name: "agent-1" },
+      { id: "bad00002", name: "valeria-29" },
+      { id: "bad00003", name: "busy-agent" },
+    ]);
+    for (const item of planned) {
+      expect(listAgentAliases(item.id, db)).toContainEqual(expect.objectContaining({
+        label: item.new_name,
+        alias_kind: "candidate",
+        status: "quarantined",
+      }));
+      expect(resolveAgentIdentity({ alias: item.new_name }, {}, db)).toEqual({
+        identity_id: null,
+        local_agent_id: null,
+        resolved_by: "none",
+        trust: "denied",
+      });
+    }
   });
 
   it("should use distinct fallback names when the preferred pool is exhausted", () => {
@@ -253,11 +347,38 @@ describe("normalizeGeneratedAgentNames", () => {
       ["bad99999", "agent-1", timestamp, timestamp],
     );
 
-    const renamed = normalizeGeneratedAgentNames(db);
-    expect(renamed).toHaveLength(1);
-    expect(renamed[0]!.old_name).toBe("agent-1");
-    expect(renamed[0]!.new_name).toMatch(/^[a-z]+$/);
-    expect(PREFERRED_AGENT_NAMES).not.toContain(renamed[0]!.new_name as any);
+    const planned = normalizeGeneratedAgentNames(db);
+    expect(planned).toHaveLength(1);
+    expect(planned[0]!.old_name).toBe("agent-1");
+    expect(planned[0]!.new_name).toMatch(/^[a-z]+$/);
+    expect(PREFERRED_AGENT_NAMES).not.toContain(planned[0]!.new_name as any);
+    expect(getAgent("bad99999", db)?.name).toBe("agent-1");
+    expect(listAgentAliases("bad99999", db)).toContainEqual(expect.objectContaining({
+      label: planned[0]!.new_name,
+      alias_kind: "candidate",
+      status: "quarantined",
+    }));
+  });
+
+  it("should reuse the same deterministic candidate without appending duplicates", () => {
+    const db = getDatabase();
+    const timestamp = new Date().toISOString();
+    db.run(
+      "INSERT INTO agents (id, name, created_at, last_seen_at) VALUES (?, ?, ?, ?)",
+      ["bad00004", "agent-2", timestamp, timestamp],
+    );
+
+    const first = normalizeGeneratedAgentNames(db);
+    const second = normalizeGeneratedAgentNames(db);
+
+    expect(second).toEqual(first);
+    expect(getAgent("bad00004", db)?.name).toBe("agent-2");
+    expect(listAgentAliases("bad00004", db)).toHaveLength(1);
+    expect(listAgentAliases("bad00004", db)[0]).toEqual(expect.objectContaining({
+      label: first[0]!.new_name,
+      alias_kind: "candidate",
+      status: "quarantined",
+    }));
   });
 
   it("should not suggest preferred-name suffix variants after exhausting the name pool", () => {

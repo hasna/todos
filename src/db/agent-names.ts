@@ -1,7 +1,6 @@
 import type { Database } from "bun:sqlite";
 import type { Agent } from "../types/index.js";
-import { now } from "./database.js";
-import { recordAgentAlias } from "./identity-mapping.js";
+import { recordAgentAliasCandidate } from "./identity-mapping.js";
 
 export class InvalidAgentNameError extends Error {
   readonly suggestions: string[];
@@ -302,13 +301,26 @@ export interface AgentNameNormalization {
   id: string;
   old_name: string;
   new_name: string;
-  reference_updates: number;
+  applied: false;
+  disposition: "candidate";
+  alias_kind: "candidate";
+  status: "quarantined";
+  name_updates: 0;
+  reference_updates: 0;
 }
 
+/**
+ * Plan safe replacement labels without changing the local actor label.
+ *
+ * Existing task, comment, lock, queue, and metrics consumers are not yet
+ * alias-aware. Proposed labels are therefore stored only as quarantined alias
+ * candidates. The current agents.name and every historical reference remain
+ * unchanged and discoverable until a separate consumer rollout is complete.
+ */
 export function normalizeGeneratedAgentNames(db: Database): AgentNameNormalization[] {
   const rows = db.query("SELECT * FROM agents ORDER BY created_at, id").all() as Agent[];
   const existing = new Set(rows.map((agent) => normalizeAgentNameInput(agent.name)));
-  const renamed: AgentNameNormalization[] = [];
+  const planned: AgentNameNormalization[] = [];
 
   for (const agent of rows) {
     const oldName = normalizeAgentNameInput(agent.name);
@@ -320,21 +332,28 @@ export function normalizeGeneratedAgentNames(db: Database): AgentNameNormalizati
       throw new Error("No safe agent names are available for normalization");
     }
 
-    existing.delete(oldName);
     existing.add(replacement);
-
-    const rename = db.transaction(() => {
-      recordAgentAlias(agent.id, oldName, db);
-      db.run("UPDATE agents SET name = ?, last_seen_at = ? WHERE id = ?", [replacement, now(), agent.id]);
-    });
-    rename.immediate();
-    renamed.push({
+    planned.push({
       id: agent.id,
       old_name: oldName,
       new_name: replacement,
+      applied: false,
+      disposition: "candidate",
+      alias_kind: "candidate",
+      status: "quarantined",
+      name_updates: 0,
       reference_updates: 0,
     });
   }
 
-  return renamed;
+  if (planned.length > 0) {
+    const quarantineCandidates = db.transaction(() => {
+      for (const candidate of planned) {
+        recordAgentAliasCandidate(candidate.id, candidate.new_name, db);
+      }
+    });
+    quarantineCandidates.immediate();
+  }
+
+  return planned;
 }

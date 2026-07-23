@@ -318,6 +318,7 @@ export interface AgentIdentitySourceMapping extends IdentitySourceLineage {
   local_agent_id: string | null;
   identity_id: string | null;
   observed_label: string | null;
+  evidence: Record<string, unknown>;
   mapping_basis: IdentityMappingBasis;
   status: IdentityMappingStatus;
   revision: number;
@@ -339,6 +340,7 @@ export interface AgentIdentityMappingInput extends IdentitySourceLineage {
   local_agent_id?: string | null;
   identity_id?: string | null;
   observed_label?: string | null;
+  evidence?: Record<string, unknown>;
   mapping_basis: IdentityMappingBasis;
   status?: "active" | "retired";
 }
