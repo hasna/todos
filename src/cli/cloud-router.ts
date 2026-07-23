@@ -13,6 +13,7 @@ import type { Agent, CreatePlanInput, CreateTaskListInput, CreateTemplateInput, 
 import type { UpdateTemplateInput } from "../storage/interfaces.js";
 import { redactEvidenceText } from "../lib/redaction.js";
 import type { PrGroupEventListOptions, PrGroupEventPage, PrGroupStateView } from "../pr-groups/types.js";
+import { parsePrGroupEventPage, parsePrGroupStateView } from "../pr-groups/http-client.js";
 
 type Env = Record<string, string | undefined>;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -368,18 +369,15 @@ export function resetTodosCloudClient(): void {
 }
 
 function assertRemotePrGroupView(value: unknown, route: string): PrGroupStateView {
-  if (!value || typeof value !== "object" ||
-      (value as { authoritative?: unknown }).authoritative !== true ||
-      (value as { authority?: unknown }).authority !== "remote" ||
-      !Array.isArray((value as { attempts?: unknown }).attempts) ||
-      !Array.isArray((value as { review_receipts?: unknown }).review_receipts) ||
-      !Array.isArray((value as { conditional_merge_receipts?: unknown }).conditional_merge_receipts)) {
+  try {
+    return parsePrGroupStateView(value, "remote", route);
+  } catch (error) {
     throw new Error(
-      `REMOTE_PR_GROUP_INVALID_RESPONSE: ${route} did not return a complete authoritative remote projection; ` +
+      `REMOTE_PR_GROUP_INVALID_RESPONSE: ${route} did not return a complete closed authoritative remote projection; ` +
         "local SQLite fallback is disabled",
+      { cause: error },
     );
   }
-  return value as PrGroupStateView;
 }
 
 /** Read an authoritative remote PR-group projection without local fallback. */
@@ -387,7 +385,14 @@ export async function cloudGetPrGroup(client: HasnaStorageClient, groupId: strin
   const route = `/v1/pr-groups/${encodeURIComponent(groupId)}`;
   const raw = await requiredRemoteRoute(client, route, () =>
     client.transport.get<unknown>(`/pr-groups/${encodeURIComponent(groupId)}`));
-  const view = raw && typeof raw === "object" ? (raw as { view?: unknown }).view : undefined;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw) ||
+      Object.keys(raw).length !== 1 || !("view" in raw)) {
+    throw new Error(
+      `REMOTE_PR_GROUP_INVALID_RESPONSE: ${route} returned a non-authoritative response envelope; ` +
+        "local SQLite fallback is disabled",
+    );
+  }
+  const view = (raw as { view: unknown }).view;
   const authoritative = assertRemotePrGroupView(view, route);
   if (authoritative.group?.id !== groupId) {
     throw new Error(
@@ -412,20 +417,22 @@ export async function cloudPrGroupEvents(
         ...(options.after_sequence !== undefined ? { after_sequence: options.after_sequence } : {}),
       },
     }));
-  const history = raw && typeof raw === "object" ? (raw as { history?: unknown }).history : undefined;
-  if (!history || typeof history !== "object" ||
-      (history as { authoritative?: unknown }).authoritative !== true ||
-      (history as { authority?: unknown }).authority !== "remote" ||
-      (history as { group_id?: unknown }).group_id !== groupId ||
-      !Array.isArray((history as { events?: unknown }).events) ||
-      typeof (history as { count?: unknown }).count !== "number" ||
-      (history as { events: unknown[] }).events.length !== (history as { count: number }).count) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw) ||
+      Object.keys(raw).length !== 1 || !("history" in raw)) {
     throw new Error(
-      `REMOTE_PR_GROUP_INVALID_RESPONSE: ${route} did not return a complete authoritative remote event page; ` +
+      `REMOTE_PR_GROUP_INVALID_RESPONSE: ${route} returned a non-authoritative response envelope; ` +
         "local SQLite fallback is disabled",
     );
   }
-  return history as PrGroupEventPage;
+  try {
+    return parsePrGroupEventPage((raw as { history: unknown }).history, "remote", route, groupId);
+  } catch (error) {
+    throw new Error(
+      `REMOTE_PR_GROUP_INVALID_RESPONSE: ${route} did not return a complete closed authoritative remote event page; ` +
+        "local SQLite fallback is disabled",
+      { cause: error },
+    );
+  }
 }
 
 /** Unwrap the `{ task }` envelope the todos `/v1` API returns for single tasks. */

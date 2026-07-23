@@ -15,6 +15,7 @@ export type {
   AppendPrGroupEventInput,
   PrGroupAdapterViews,
   PrGroupAttemptRecord,
+  PrGroupCleanupProof,
   PrGroupDecisionEnvelopeAdapter,
   PrGroupEventListOptions,
   PrGroupEventPage,
@@ -58,6 +59,7 @@ export {
   getJsonContract,
   validateJsonContract,
 } from "./contracts.js";
+export { TODOS_AUTHORITATIVE_JSON_PROJECTIONS } from "./json-contracts.js";
 export type {
   CreateJsonContractsManifestOptions,
   JsonContractValidationIssue,

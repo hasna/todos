@@ -1,4 +1,5 @@
 export const PR_GROUP_LEDGER_SCHEMA_VERSION = 1 as const;
+export const PR_GROUP_REPAIR_CYCLE_LIMIT = 2 as const;
 
 export type PrGroupState =
   | "admitted"
@@ -13,9 +14,10 @@ export type PrGroupState =
   | "merged"
   | "cancelled"
   | "failed"
+  | "no_go"
   | "cleanup_eligible";
 
-export type PrGroupTerminalOutcome = "merged" | "cancelled" | "failed";
+export type PrGroupTerminalOutcome = "merged" | "cancelled" | "failed" | "no_go";
 
 export type PrGroupAttemptStatus =
   | "admitted"
@@ -28,7 +30,8 @@ export type PrGroupAttemptStatus =
   | "fenced"
   | "merged"
   | "cancelled"
-  | "failed";
+  | "failed"
+  | "no_go";
 
 export type PrGroupEventType =
   | "admission"
@@ -51,6 +54,7 @@ export type PrGroupEventType =
 export type PrGroupEventOutcome =
   | "approved"
   | "changes_requested"
+  | "dismissed"
   | "accepted"
   | "rejected"
   | "merged"
@@ -63,9 +67,15 @@ export interface PrGroupRecord {
   identity_key: string;
   root_request_id: string;
   repository: string;
+  leaf_task_id: string;
+  branch: string;
+  pr_number: number | null;
+  base_sha: string | null;
   state: PrGroupState;
   active_attempt_id: string | null;
   active_generation: string | null;
+  repair_cycle_count: number;
+  repair_cycle_limit: typeof PR_GROUP_REPAIR_CYCLE_LIMIT;
   terminal_attempt_id: string | null;
   terminal_generation: string | null;
   terminal_outcome: PrGroupTerminalOutcome | null;
@@ -87,6 +97,9 @@ export interface PrGroupAttemptRecord {
   previous_attempt_id: string | null;
   worktree: string;
   branch: string;
+  repository: string;
+  pr_number: number | null;
+  base_sha: string | null;
   provider: string | null;
   provider_run_id: string | null;
   profile_alias: string | null;
@@ -114,7 +127,18 @@ export interface PrGroupEventRecord {
   message: string | null;
   head_sha: string | null;
   receipt_key: string | null;
+  review_receipt_key: string | null;
+  conditional_merge_receipt_key: string | null;
   outcome: PrGroupEventOutcome | null;
+  repository: string;
+  pr_number: number | null;
+  base_sha: string | null;
+  actor_id: string | null;
+  actor_run_id: string | null;
+  expected_reviewer_id: string | null;
+  expected_reviewer_run_id: string | null;
+  repair_cycle: number | null;
+  cleanup_proof: PrGroupCleanupProof | null;
   metadata: Record<string, unknown>;
   payload_hash: string;
   created_at: string;
@@ -129,6 +153,8 @@ export interface PrGroupStateView {
   latest_event: PrGroupEventRecord | null;
   review_receipts: PrGroupEventRecord[];
   conditional_merge_receipts: PrGroupEventRecord[];
+  merge_receipts: PrGroupEventRecord[];
+  cleanup_receipts: PrGroupEventRecord[];
   cleanup_eligible: boolean;
   adapters: PrGroupAdapterViews;
   diagnostics: {
@@ -152,6 +178,9 @@ export interface PrGroupWorkRunAdapter {
   previous_run_id: string | null;
   worktree: string;
   branch: string;
+  repository: string;
+  pr_number: number | null;
+  base_sha: string | null;
   provider: string | null;
   provider_run_id: string | null;
   profile_alias: string | null;
@@ -167,9 +196,14 @@ export interface PrGroupEvidenceRefAdapter {
   work_run_id: string;
   sequence: number;
   evidence_type: PrGroupEventType;
+  repository: string;
+  pr_number: number | null;
+  base_sha: string | null;
   head_sha: string | null;
   receipt_key: string | null;
   outcome: PrGroupEventOutcome | null;
+  actor_id: string | null;
+  actor_run_id: string | null;
   payload_hash: string;
   created_at: string;
 }
@@ -191,6 +225,8 @@ export interface PrGroupDecisionEnvelopeAdapter {
   state: PrGroupState;
   active_work_run_id: string | null;
   active_writer_generation: string | null;
+  repair_cycle_count: number;
+  repair_cycle_limit: typeof PR_GROUP_REPAIR_CYCLE_LIMIT;
   terminal_outcome: PrGroupTerminalOutcome | null;
   terminal_head_sha: string | null;
   cleanup_eligible: boolean;
@@ -223,6 +259,8 @@ export interface AdmitPrGroupInput {
   writer_generation: string;
   worktree: string;
   branch: string;
+  pr_number?: number | null;
+  base_sha?: string | null;
   provider?: string | null;
   provider_run_id?: string | null;
   profile_alias?: string | null;
@@ -231,15 +269,20 @@ export interface AdmitPrGroupInput {
 
 export interface RecoverPrGroupInput {
   group_id: string;
+  root_request_id: string;
+  repository: string;
   leaf_task_id: string;
+  expected_attempt_id: string;
   dispatch_attempt: string;
   expected_generation: string;
   writer_generation: string;
   worktree: string;
   branch: string;
-  provider?: string | null;
-  provider_run_id?: string | null;
-  profile_alias?: string | null;
+  pr_number: number | null;
+  base_sha: string | null;
+  provider: string | null;
+  provider_run_id: string | null;
+  profile_alias: string | null;
   idempotency_key: string;
   message?: string | null;
   metadata?: Record<string, unknown>;
@@ -255,9 +298,34 @@ export interface AppendPrGroupEventInput {
   message?: string | null;
   head_sha?: string | null;
   receipt_key?: string | null;
+  review_receipt_key?: string | null;
+  conditional_merge_receipt_key?: string | null;
   outcome?: PrGroupEventOutcome | null;
+  repository?: string;
+  pr_number?: number | null;
+  base_sha?: string | null;
+  actor_id?: string | null;
+  actor_run_id?: string | null;
+  expected_reviewer_id?: string | null;
+  expected_reviewer_run_id?: string | null;
+  authenticated_actor_id?: string | null;
+  authenticated_actor_run_id?: string | null;
+  repair_cycle?: number | null;
+  cleanup_proof?: PrGroupCleanupProof | null;
   metadata?: Record<string, unknown>;
   created_at?: string;
+}
+
+export interface PrGroupCleanupProof {
+  worktree_clean: true;
+  provider_reachable: true;
+  provider_head_sha: string;
+  pr_policy_satisfied: true;
+  terminal_disposition: PrGroupTerminalOutcome;
+  writer_retired: true;
+  review_receipt_key: string | null;
+  conditional_merge_receipt_key: string | null;
+  merge_receipt_key: string | null;
 }
 
 export interface PrGroupMutationResult {

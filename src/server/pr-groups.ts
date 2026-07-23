@@ -38,11 +38,17 @@ async function readJson(req: Request): Promise<Record<string, unknown> | null> {
   }
 }
 
+export interface PrGroupRequestPrincipal {
+  actor_id?: string | null;
+  actor_run_id?: string | null;
+}
+
 export async function handlePrGroupHttpRequest(
   req: Request,
   url: URL,
   ledger: PrGroupLedger,
   basePath: "/api/pr-groups" | "/v1/pr-groups",
+  principal?: PrGroupRequestPrincipal,
 ): Promise<Response | null> {
   const path = url.pathname;
   if (path !== basePath && !path.startsWith(`${basePath}/`)) return null;
@@ -84,6 +90,8 @@ export async function handlePrGroupHttpRequest(
         return json(await ledger.append({
           ...body,
           group_id: groupId,
+          authenticated_actor_id: principal?.actor_id ?? undefined,
+          authenticated_actor_run_id: principal?.actor_run_id ?? undefined,
         } as unknown as AppendPrGroupEventInput), 201);
       }
       return json({ error: "method not allowed" }, 405);

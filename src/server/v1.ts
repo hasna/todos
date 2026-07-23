@@ -389,6 +389,7 @@ export async function handleV1Request(
       url,
       (dependencies.getPrGroupLedger ?? getCloudPrGroupLedger)(),
       "/v1/pr-groups",
+      { actor_id: principal.agent, actor_run_id: principal.kid },
     );
   }
   const store = (dependencies.getStorageAdapter ?? getCloudStorageAdapter)();

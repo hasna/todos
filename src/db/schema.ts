@@ -1328,9 +1328,15 @@ export function ensureSchema(db: Database): void {
       identity_key TEXT NOT NULL UNIQUE,
       root_request_id TEXT NOT NULL,
       repository TEXT NOT NULL,
+      leaf_task_id TEXT NOT NULL,
+      branch TEXT NOT NULL,
+      pr_number INTEGER,
+      base_sha TEXT,
       state TEXT NOT NULL,
       active_attempt_id TEXT,
       active_generation TEXT,
+      repair_cycle_count INTEGER NOT NULL DEFAULT 0,
+      repair_cycle_limit INTEGER NOT NULL DEFAULT 2,
       terminal_attempt_id TEXT,
       terminal_generation TEXT,
       terminal_outcome TEXT,
@@ -1356,6 +1362,9 @@ export function ensureSchema(db: Database): void {
       previous_attempt_id TEXT REFERENCES pr_group_attempts(id) ON DELETE SET NULL,
       worktree TEXT NOT NULL,
       branch TEXT NOT NULL,
+      repository TEXT NOT NULL,
+      pr_number INTEGER,
+      base_sha TEXT,
       provider TEXT,
       provider_run_id TEXT,
       profile_alias TEXT,
@@ -1388,7 +1397,18 @@ export function ensureSchema(db: Database): void {
       message TEXT,
       head_sha TEXT,
       receipt_key TEXT,
+      review_receipt_key TEXT,
+      conditional_merge_receipt_key TEXT,
       outcome TEXT,
+      repository TEXT NOT NULL,
+      pr_number INTEGER,
+      base_sha TEXT,
+      actor_id TEXT,
+      actor_run_id TEXT,
+      expected_reviewer_id TEXT,
+      expected_reviewer_run_id TEXT,
+      repair_cycle INTEGER,
+      cleanup_proof TEXT,
       metadata TEXT NOT NULL DEFAULT '{}',
       payload_hash TEXT NOT NULL,
       created_at TEXT NOT NULL,
@@ -1399,6 +1419,119 @@ export function ensureSchema(db: Database): void {
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_pr_group_events_group_sequence ON pr_group_events(group_id, sequence)");
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_pr_group_events_attempt ON pr_group_events(attempt_id, sequence)");
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_pr_group_events_receipt ON pr_group_events(group_id, receipt_key)");
+  ensureColumn("pr_groups", "leaf_task_id", "TEXT");
+  ensureColumn("pr_groups", "branch", "TEXT");
+  ensureColumn("pr_groups", "pr_number", "INTEGER");
+  ensureColumn("pr_groups", "base_sha", "TEXT");
+  ensureColumn("pr_groups", "repair_cycle_count", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn("pr_groups", "repair_cycle_limit", "INTEGER NOT NULL DEFAULT 2");
+  ensureColumn("pr_group_attempts", "repository", "TEXT");
+  ensureColumn("pr_group_attempts", "pr_number", "INTEGER");
+  ensureColumn("pr_group_attempts", "base_sha", "TEXT");
+  ensureColumn("pr_group_events", "review_receipt_key", "TEXT");
+  ensureColumn("pr_group_events", "conditional_merge_receipt_key", "TEXT");
+  ensureColumn("pr_group_events", "repository", "TEXT");
+  ensureColumn("pr_group_events", "pr_number", "INTEGER");
+  ensureColumn("pr_group_events", "base_sha", "TEXT");
+  ensureColumn("pr_group_events", "actor_id", "TEXT");
+  ensureColumn("pr_group_events", "actor_run_id", "TEXT");
+  ensureColumn("pr_group_events", "expected_reviewer_id", "TEXT");
+  ensureColumn("pr_group_events", "expected_reviewer_run_id", "TEXT");
+  ensureColumn("pr_group_events", "repair_cycle", "INTEGER");
+  ensureColumn("pr_group_events", "cleanup_proof", "TEXT");
+  try {
+    db.exec(`
+      UPDATE pr_groups
+      SET leaf_task_id = COALESCE(leaf_task_id, (
+            SELECT attempt.leaf_task_id
+            FROM pr_group_attempts AS attempt
+            WHERE attempt.group_id = pr_groups.id
+            ORDER BY CASE WHEN attempt.id = pr_groups.active_attempt_id THEN 0 ELSE 1 END,
+                     attempt.created_at ASC, attempt.id ASC
+            LIMIT 1
+          )),
+          branch = COALESCE(branch, (
+            SELECT attempt.branch
+            FROM pr_group_attempts AS attempt
+            WHERE attempt.group_id = pr_groups.id
+            ORDER BY CASE WHEN attempt.id = pr_groups.active_attempt_id THEN 0 ELSE 1 END,
+                     attempt.created_at ASC, attempt.id ASC
+            LIMIT 1
+          ));
+      UPDATE pr_group_attempts
+      SET repository = COALESCE(repository, (
+            SELECT groups.repository FROM pr_groups AS groups
+            WHERE groups.id = pr_group_attempts.group_id
+          )),
+          pr_number = COALESCE(pr_number, (
+            SELECT groups.pr_number FROM pr_groups AS groups
+            WHERE groups.id = pr_group_attempts.group_id
+          )),
+          base_sha = COALESCE(base_sha, (
+            SELECT groups.base_sha FROM pr_groups AS groups
+            WHERE groups.id = pr_group_attempts.group_id
+          ));
+      UPDATE pr_groups
+      SET pr_number = COALESCE(pr_number, (
+            SELECT attempt.pr_number
+            FROM pr_group_attempts AS attempt
+            WHERE attempt.group_id = pr_groups.id AND attempt.pr_number IS NOT NULL
+            ORDER BY CASE WHEN attempt.id = pr_groups.active_attempt_id THEN 0 ELSE 1 END,
+                     attempt.created_at ASC, attempt.id ASC
+            LIMIT 1
+          )),
+          base_sha = COALESCE(base_sha, (
+            SELECT attempt.base_sha
+            FROM pr_group_attempts AS attempt
+            WHERE attempt.group_id = pr_groups.id AND attempt.base_sha IS NOT NULL
+            ORDER BY CASE WHEN attempt.id = pr_groups.active_attempt_id THEN 0 ELSE 1 END,
+                     attempt.created_at ASC, attempt.id ASC
+            LIMIT 1
+          ));
+      UPDATE pr_group_attempts
+      SET pr_number = COALESCE(pr_number, (
+            SELECT groups.pr_number FROM pr_groups AS groups
+            WHERE groups.id = pr_group_attempts.group_id
+          )),
+          base_sha = COALESCE(base_sha, (
+            SELECT groups.base_sha FROM pr_groups AS groups
+            WHERE groups.id = pr_group_attempts.group_id
+          ));
+      UPDATE pr_group_events
+      SET repository = COALESCE(repository, (
+            SELECT attempt.repository FROM pr_group_attempts AS attempt
+            WHERE attempt.id = pr_group_events.attempt_id
+          ), (
+            SELECT groups.repository FROM pr_groups AS groups
+            WHERE groups.id = pr_group_events.group_id
+          )),
+          pr_number = COALESCE(pr_number, (
+            SELECT attempt.pr_number FROM pr_group_attempts AS attempt
+            WHERE attempt.id = pr_group_events.attempt_id
+          ), (
+            SELECT groups.pr_number FROM pr_groups AS groups
+            WHERE groups.id = pr_group_events.group_id
+          )),
+          base_sha = COALESCE(base_sha, (
+            SELECT attempt.base_sha FROM pr_group_attempts AS attempt
+            WHERE attempt.id = pr_group_events.attempt_id
+          ), (
+            SELECT groups.base_sha FROM pr_groups AS groups
+            WHERE groups.id = pr_group_events.group_id
+          ));
+      INSERT OR IGNORE INTO _migrations (id)
+      SELECT 66
+      WHERE NOT EXISTS (
+        SELECT 1 FROM pr_groups WHERE leaf_task_id IS NULL OR branch IS NULL
+      )
+        AND NOT EXISTS (
+          SELECT 1 FROM pr_group_attempts WHERE repository IS NULL
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM pr_group_events WHERE repository IS NULL
+        );
+    `);
+  } catch {}
 }
 
 export function backfillTaskTags(db: Database): void {

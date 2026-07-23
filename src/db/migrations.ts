@@ -1306,4 +1306,122 @@ export const MIGRATIONS = [
   CREATE INDEX IF NOT EXISTS idx_pr_group_events_receipt ON pr_group_events(group_id, receipt_key);
   INSERT OR IGNORE INTO _migrations (id) VALUES (65);
   `,
+  // Migration 66: Repair rejected-head PR-group lineage and receipt bindings
+  `
+  ALTER TABLE pr_groups ADD COLUMN leaf_task_id TEXT;
+  ALTER TABLE pr_groups ADD COLUMN branch TEXT;
+  ALTER TABLE pr_groups ADD COLUMN pr_number INTEGER;
+  ALTER TABLE pr_groups ADD COLUMN base_sha TEXT;
+  ALTER TABLE pr_groups ADD COLUMN repair_cycle_count INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE pr_groups ADD COLUMN repair_cycle_limit INTEGER NOT NULL DEFAULT 2;
+  ALTER TABLE pr_group_attempts ADD COLUMN repository TEXT;
+  ALTER TABLE pr_group_attempts ADD COLUMN pr_number INTEGER;
+  ALTER TABLE pr_group_attempts ADD COLUMN base_sha TEXT;
+  ALTER TABLE pr_group_events ADD COLUMN review_receipt_key TEXT;
+  ALTER TABLE pr_group_events ADD COLUMN conditional_merge_receipt_key TEXT;
+  ALTER TABLE pr_group_events ADD COLUMN repository TEXT;
+  ALTER TABLE pr_group_events ADD COLUMN pr_number INTEGER;
+  ALTER TABLE pr_group_events ADD COLUMN base_sha TEXT;
+  ALTER TABLE pr_group_events ADD COLUMN actor_id TEXT;
+  ALTER TABLE pr_group_events ADD COLUMN actor_run_id TEXT;
+  ALTER TABLE pr_group_events ADD COLUMN expected_reviewer_id TEXT;
+  ALTER TABLE pr_group_events ADD COLUMN expected_reviewer_run_id TEXT;
+  ALTER TABLE pr_group_events ADD COLUMN repair_cycle INTEGER;
+  ALTER TABLE pr_group_events ADD COLUMN cleanup_proof TEXT;
+
+  UPDATE pr_groups
+  SET leaf_task_id = COALESCE(leaf_task_id, (
+        SELECT attempt.leaf_task_id
+        FROM pr_group_attempts AS attempt
+        WHERE attempt.group_id = pr_groups.id
+        ORDER BY CASE WHEN attempt.id = pr_groups.active_attempt_id THEN 0 ELSE 1 END,
+                 attempt.created_at ASC, attempt.id ASC
+        LIMIT 1
+      )),
+      branch = COALESCE(branch, (
+        SELECT attempt.branch
+        FROM pr_group_attempts AS attempt
+        WHERE attempt.group_id = pr_groups.id
+        ORDER BY CASE WHEN attempt.id = pr_groups.active_attempt_id THEN 0 ELSE 1 END,
+                 attempt.created_at ASC, attempt.id ASC
+        LIMIT 1
+      ));
+
+  UPDATE pr_group_attempts
+  SET repository = COALESCE(repository, (
+        SELECT groups.repository FROM pr_groups AS groups
+        WHERE groups.id = pr_group_attempts.group_id
+      )),
+      pr_number = COALESCE(pr_number, (
+        SELECT groups.pr_number FROM pr_groups AS groups
+        WHERE groups.id = pr_group_attempts.group_id
+      )),
+      base_sha = COALESCE(base_sha, (
+        SELECT groups.base_sha FROM pr_groups AS groups
+        WHERE groups.id = pr_group_attempts.group_id
+      ));
+
+  UPDATE pr_groups
+  SET pr_number = COALESCE(pr_number, (
+        SELECT attempt.pr_number
+        FROM pr_group_attempts AS attempt
+        WHERE attempt.group_id = pr_groups.id AND attempt.pr_number IS NOT NULL
+        ORDER BY CASE WHEN attempt.id = pr_groups.active_attempt_id THEN 0 ELSE 1 END,
+                 attempt.created_at ASC, attempt.id ASC
+        LIMIT 1
+      )),
+      base_sha = COALESCE(base_sha, (
+        SELECT attempt.base_sha
+        FROM pr_group_attempts AS attempt
+        WHERE attempt.group_id = pr_groups.id AND attempt.base_sha IS NOT NULL
+        ORDER BY CASE WHEN attempt.id = pr_groups.active_attempt_id THEN 0 ELSE 1 END,
+                 attempt.created_at ASC, attempt.id ASC
+        LIMIT 1
+      ));
+
+  UPDATE pr_group_attempts
+  SET pr_number = COALESCE(pr_number, (
+        SELECT groups.pr_number FROM pr_groups AS groups
+        WHERE groups.id = pr_group_attempts.group_id
+      )),
+      base_sha = COALESCE(base_sha, (
+        SELECT groups.base_sha FROM pr_groups AS groups
+        WHERE groups.id = pr_group_attempts.group_id
+      ));
+
+  UPDATE pr_group_events
+  SET repository = COALESCE(repository, (
+        SELECT attempt.repository FROM pr_group_attempts AS attempt
+        WHERE attempt.id = pr_group_events.attempt_id
+      ), (
+        SELECT groups.repository FROM pr_groups AS groups
+        WHERE groups.id = pr_group_events.group_id
+      )),
+      pr_number = COALESCE(pr_number, (
+        SELECT attempt.pr_number FROM pr_group_attempts AS attempt
+        WHERE attempt.id = pr_group_events.attempt_id
+      ), (
+        SELECT groups.pr_number FROM pr_groups AS groups
+        WHERE groups.id = pr_group_events.group_id
+      )),
+      base_sha = COALESCE(base_sha, (
+        SELECT attempt.base_sha FROM pr_group_attempts AS attempt
+        WHERE attempt.id = pr_group_events.attempt_id
+      ), (
+        SELECT groups.base_sha FROM pr_groups AS groups
+        WHERE groups.id = pr_group_events.group_id
+      ));
+
+  INSERT OR IGNORE INTO _migrations (id)
+  SELECT 66
+  WHERE NOT EXISTS (
+    SELECT 1 FROM pr_groups WHERE leaf_task_id IS NULL OR branch IS NULL
+  )
+    AND NOT EXISTS (
+      SELECT 1 FROM pr_group_attempts WHERE repository IS NULL
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM pr_group_events WHERE repository IS NULL
+    );
+  `,
 ];

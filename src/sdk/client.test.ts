@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { TodosClient } from "./client.js";
 import { resetConfig, updateConfig } from "../lib/config.js";
+import { getJsonContract, validateJsonContract } from "../json-contracts.js";
 
 const originalHome = process.env["HOME"];
 const originalTodosApiUrl = process.env["TODOS_API_URL"];
@@ -151,6 +152,31 @@ describe("TodosClient local API config", () => {
       "/api/pr-groups/prg_test",
       "/api/pr-groups/prg_test/events",
     ]);
+  });
+
+  test("publishes and validates the stable PR-group JSON projection contract", () => {
+    const contract = getJsonContract("pr_group_state_view");
+    expect(contract).toMatchObject({
+      id: "pr_group_state_view",
+      stability: "stable",
+      surfaces: expect.arrayContaining(["cli", "api", "sdk"]),
+      additionalProperties: false,
+    });
+    expect(validateJsonContract("pr_group_state_view", {
+      schema_version: 1,
+      authoritative: true,
+      authority: "local",
+      group: {},
+      attempts: [],
+      latest_event: null,
+      review_receipts: [],
+      conditional_merge_receipts: [],
+      merge_receipts: [],
+      cleanup_receipts: [],
+      cleanup_eligible: false,
+      adapters: {},
+      diagnostics: {},
+    })).toMatchObject({ ok: true });
   });
 
   // M9: subscribe() must send auth headers (x-api-key), not a bare fetch.

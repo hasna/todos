@@ -8,7 +8,7 @@ import { createLocalPrGroupLedger } from "../pr-groups/index.js";
 
 let db: Database;
 let store: TodosStorageAdapter;
-let principal: { agent: string | null; scopes: string[] };
+let principal: { agent: string | null; kid?: string; scopes: string[] };
 let dependencies: V1RequestDependencies;
 
 function request(path: string, method = "GET", body?: unknown): Promise<Response | null> {
@@ -69,6 +69,82 @@ describe("/v1 task-list cloud parity", () => {
     });
     expect(await (await request(`/v1/pr-groups/${admission.view.group.id}/events?limit=1`))!.json())
       .toMatchObject({ history: { count: 1, has_more: true } });
+  });
+
+  test("binds review actor and actor-run identity to the signed v1 principal", async () => {
+    const head = "a".repeat(40);
+    const base = "b".repeat(40);
+    principal = { agent: "reviewer-1", kid: "signed-key-run-1", scopes: ["todos:*"] };
+    const admitted = await request("/v1/pr-groups/admit", "POST", {
+      root_request_id: "authenticated-review",
+      repository: "hasna/todos",
+      leaf_task_id: "leaf-authenticated-review",
+      dispatch_attempt: "dispatch-authenticated-review",
+      writer_generation: "generation-authenticated-review",
+      worktree: "/tmp/authenticated-review",
+      branch: "feat/authenticated-review",
+      pr_number: 78,
+      base_sha: base,
+      admitted_at: "2026-07-23T10:00:00.000Z",
+    });
+    const admission = await admitted!.json() as {
+      view: { group: { id: string }; attempts: Array<{ id: string }> };
+    };
+    const path = `/v1/pr-groups/${admission.view.group.id}/events`;
+    const envelope = {
+      attempt_id: admission.view.attempts[0]!.id,
+      writer_generation: "generation-authenticated-review",
+    };
+    for (const [idempotency_key, event_type] of [
+      ["authenticated-start", "started"],
+      ["authenticated-handoff", "handoff"],
+    ]) {
+      expect((await request(path, "POST", { ...envelope, idempotency_key, event_type }))?.status).toBe(201);
+    }
+    expect((await request(path, "POST", {
+      ...envelope,
+      idempotency_key: "authenticated-review-request",
+      event_type: "review_requested",
+      head_sha: head,
+      repository: "hasna/todos",
+      pr_number: 78,
+      base_sha: base,
+      expected_reviewer_id: "reviewer-1",
+    }))?.status).toBe(201);
+
+    const forged = await request(path, "POST", {
+      ...envelope,
+      idempotency_key: "forged-review-receipt",
+      event_type: "review_receipt",
+      head_sha: head,
+      receipt_key: "forged-review-receipt",
+      outcome: "approved",
+      repository: "hasna/todos",
+      pr_number: 78,
+      base_sha: base,
+      actor_id: "reviewer-1",
+      actor_run_id: "forged-run",
+    });
+    expect(forged?.status).toBe(409);
+    expect(await forged!.json()).toMatchObject({ code: "PR_GROUP_IDENTITY_CONFLICT" });
+
+    const accepted = await request(path, "POST", {
+      ...envelope,
+      idempotency_key: "authenticated-review-receipt",
+      event_type: "review_receipt",
+      head_sha: head,
+      receipt_key: "authenticated-review-receipt",
+      outcome: "approved",
+      repository: "hasna/todos",
+      pr_number: 78,
+      base_sha: base,
+      actor_id: "reviewer-1",
+      actor_run_id: "signed-key-run-1",
+    });
+    expect(accepted?.status).toBe(201);
+    expect(await accepted!.json()).toMatchObject({
+      event: { actor_id: "reviewer-1", actor_run_id: "signed-key-run-1" },
+    });
   });
 
   test("list tasks returns total and honors every documented filter plus offset", async () => {

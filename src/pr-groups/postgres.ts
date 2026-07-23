@@ -18,8 +18,11 @@ export function postgresPrGroupSchemaSql(): string[] {
     `CREATE TABLE IF NOT EXISTS todos_pr_groups (
       schema_version integer NOT NULL DEFAULT 1, id text PRIMARY KEY,
       identity_key text NOT NULL UNIQUE, root_request_id text NOT NULL,
-      repository text NOT NULL, state text NOT NULL, active_attempt_id text,
-      active_generation text, terminal_attempt_id text, terminal_generation text,
+      repository text NOT NULL, leaf_task_id text NOT NULL, branch text NOT NULL,
+      pr_number integer, base_sha text, state text NOT NULL, active_attempt_id text,
+      active_generation text, repair_cycle_count integer NOT NULL DEFAULT 0,
+      repair_cycle_limit integer NOT NULL DEFAULT 2,
+      terminal_attempt_id text, terminal_generation text,
       terminal_outcome text, terminal_head_sha text, terminal_at timestamptz,
       cleanup_eligible_at timestamptz, revision integer NOT NULL DEFAULT 1,
       created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL
@@ -34,7 +37,8 @@ export function postgresPrGroupSchemaSql(): string[] {
       leaf_task_id text NOT NULL, dispatch_attempt text NOT NULL,
       writer_generation text NOT NULL,
       previous_attempt_id text REFERENCES todos_pr_group_attempts(id) ON DELETE SET NULL,
-      worktree text NOT NULL, branch text NOT NULL, provider text,
+      worktree text NOT NULL, branch text NOT NULL, repository text NOT NULL,
+      pr_number integer, base_sha text, provider text,
       provider_run_id text, profile_alias text, status text NOT NULL,
       admitted_at timestamptz NOT NULL, started_at timestamptz,
       last_heartbeat_at timestamptz, handed_off_at timestamptz,
@@ -53,7 +57,11 @@ export function postgresPrGroupSchemaSql(): string[] {
       attempt_id text NOT NULL REFERENCES todos_pr_group_attempts(id) ON DELETE CASCADE,
       writer_generation text NOT NULL, sequence integer NOT NULL,
       idempotency_key text NOT NULL, event_type text NOT NULL, state text NOT NULL,
-      message text, head_sha text, receipt_key text, outcome text,
+      message text, head_sha text, receipt_key text, review_receipt_key text,
+      conditional_merge_receipt_key text, outcome text, repository text NOT NULL,
+      pr_number integer, base_sha text, actor_id text, actor_run_id text,
+      expected_reviewer_id text, expected_reviewer_run_id text,
+      repair_cycle integer, cleanup_proof jsonb,
       metadata jsonb NOT NULL DEFAULT '{}'::jsonb, payload_hash text NOT NULL,
       created_at timestamptz NOT NULL,
       UNIQUE (group_id, sequence), UNIQUE (group_id, idempotency_key),
@@ -65,6 +73,79 @@ export function postgresPrGroupSchemaSql(): string[] {
        ON todos_pr_group_events (attempt_id, sequence)`,
     `CREATE INDEX IF NOT EXISTS todos_pr_group_events_receipt_idx
        ON todos_pr_group_events (group_id, receipt_key)`,
+    "ALTER TABLE todos_pr_groups ADD COLUMN IF NOT EXISTS leaf_task_id text",
+    "ALTER TABLE todos_pr_groups ADD COLUMN IF NOT EXISTS branch text",
+    "ALTER TABLE todos_pr_groups ADD COLUMN IF NOT EXISTS pr_number integer",
+    "ALTER TABLE todos_pr_groups ADD COLUMN IF NOT EXISTS base_sha text",
+    "ALTER TABLE todos_pr_groups ADD COLUMN IF NOT EXISTS repair_cycle_count integer NOT NULL DEFAULT 0",
+    "ALTER TABLE todos_pr_groups ADD COLUMN IF NOT EXISTS repair_cycle_limit integer NOT NULL DEFAULT 2",
+    "ALTER TABLE todos_pr_group_attempts ADD COLUMN IF NOT EXISTS repository text",
+    "ALTER TABLE todos_pr_group_attempts ADD COLUMN IF NOT EXISTS pr_number integer",
+    "ALTER TABLE todos_pr_group_attempts ADD COLUMN IF NOT EXISTS base_sha text",
+    "ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS review_receipt_key text",
+    "ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS conditional_merge_receipt_key text",
+    "ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS repository text",
+    "ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS pr_number integer",
+    "ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS base_sha text",
+    "ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS actor_id text",
+    "ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS actor_run_id text",
+    "ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS expected_reviewer_id text",
+    "ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS expected_reviewer_run_id text",
+    "ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS repair_cycle integer",
+    "ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS cleanup_proof jsonb",
+    `UPDATE todos_pr_groups AS groups
+       SET leaf_task_id = COALESCE(groups.leaf_task_id, (
+             SELECT attempt.leaf_task_id
+             FROM todos_pr_group_attempts AS attempt
+             WHERE attempt.group_id = groups.id
+             ORDER BY CASE WHEN attempt.id = groups.active_attempt_id THEN 0 ELSE 1 END,
+                      attempt.created_at ASC, attempt.id ASC
+             LIMIT 1
+           )),
+           branch = COALESCE(groups.branch, (
+             SELECT attempt.branch
+             FROM todos_pr_group_attempts AS attempt
+             WHERE attempt.group_id = groups.id
+             ORDER BY CASE WHEN attempt.id = groups.active_attempt_id THEN 0 ELSE 1 END,
+                      attempt.created_at ASC, attempt.id ASC
+             LIMIT 1
+           )),
+           pr_number = COALESCE(groups.pr_number, (
+             SELECT attempt.pr_number
+             FROM todos_pr_group_attempts AS attempt
+             WHERE attempt.group_id = groups.id AND attempt.pr_number IS NOT NULL
+             ORDER BY CASE WHEN attempt.id = groups.active_attempt_id THEN 0 ELSE 1 END,
+                      attempt.created_at ASC, attempt.id ASC
+             LIMIT 1
+           )),
+           base_sha = COALESCE(groups.base_sha, (
+             SELECT attempt.base_sha
+             FROM todos_pr_group_attempts AS attempt
+             WHERE attempt.group_id = groups.id AND attempt.base_sha IS NOT NULL
+             ORDER BY CASE WHEN attempt.id = groups.active_attempt_id THEN 0 ELSE 1 END,
+                      attempt.created_at ASC, attempt.id ASC
+             LIMIT 1
+           ))
+       WHERE groups.leaf_task_id IS NULL OR groups.branch IS NULL
+          OR groups.pr_number IS NULL OR groups.base_sha IS NULL`,
+    `UPDATE todos_pr_group_attempts AS attempt
+       SET repository = COALESCE(attempt.repository, groups.repository),
+           pr_number = COALESCE(attempt.pr_number, groups.pr_number),
+           base_sha = COALESCE(attempt.base_sha, groups.base_sha)
+       FROM todos_pr_groups AS groups
+       WHERE groups.id = attempt.group_id
+         AND (attempt.repository IS NULL OR attempt.pr_number IS NULL OR attempt.base_sha IS NULL)`,
+    `UPDATE todos_pr_group_events AS event
+       SET repository = COALESCE(event.repository, attempt.repository, groups.repository),
+           pr_number = COALESCE(event.pr_number, attempt.pr_number, groups.pr_number),
+           base_sha = COALESCE(event.base_sha, attempt.base_sha, groups.base_sha)
+       FROM todos_pr_group_attempts AS attempt, todos_pr_groups AS groups
+       WHERE attempt.id = event.attempt_id AND groups.id = event.group_id
+         AND (event.repository IS NULL OR event.pr_number IS NULL OR event.base_sha IS NULL)`,
+    "ALTER TABLE todos_pr_groups ALTER COLUMN leaf_task_id SET NOT NULL",
+    "ALTER TABLE todos_pr_groups ALTER COLUMN branch SET NOT NULL",
+    "ALTER TABLE todos_pr_group_attempts ALTER COLUMN repository SET NOT NULL",
+    "ALTER TABLE todos_pr_group_events ALTER COLUMN repository SET NOT NULL",
   ];
 }
 
@@ -77,6 +158,9 @@ function groupFromRow(row: Record<string, unknown>): PrGroupRecord {
   return {
     ...row,
     schema_version: Number(row["schema_version"]),
+    pr_number: row["pr_number"] === null ? null : Number(row["pr_number"]),
+    repair_cycle_count: Number(row["repair_cycle_count"]),
+    repair_cycle_limit: Number(row["repair_cycle_limit"]),
     revision: Number(row["revision"]),
     terminal_at: normalizeTimestamp(row["terminal_at"]),
     cleanup_eligible_at: normalizeTimestamp(row["cleanup_eligible_at"]),
@@ -89,6 +173,7 @@ function attemptFromRow(row: Record<string, unknown>): PrGroupAttemptRecord {
   return {
     ...row,
     schema_version: Number(row["schema_version"]),
+    pr_number: row["pr_number"] === null ? null : Number(row["pr_number"]),
     admitted_at: normalizeTimestamp(row["admitted_at"])!,
     started_at: normalizeTimestamp(row["started_at"]),
     last_heartbeat_at: normalizeTimestamp(row["last_heartbeat_at"]),
@@ -103,10 +188,15 @@ function attemptFromRow(row: Record<string, unknown>): PrGroupAttemptRecord {
 function eventFromRow(row: Record<string, unknown>): PrGroupEventRecord {
   let metadata = row["metadata"] ?? {};
   if (typeof metadata === "string") metadata = JSON.parse(metadata);
+  let cleanupProof = row["cleanup_proof"] ?? null;
+  if (typeof cleanupProof === "string") cleanupProof = JSON.parse(cleanupProof);
   return {
     ...row,
     schema_version: Number(row["schema_version"]),
     sequence: Number(row["sequence"]),
+    pr_number: row["pr_number"] === null ? null : Number(row["pr_number"]),
+    repair_cycle: row["repair_cycle"] === null ? null : Number(row["repair_cycle"]),
+    cleanup_proof: cleanupProof,
     metadata,
     created_at: normalizeTimestamp(row["created_at"])!,
   } as unknown as PrGroupEventRecord;
@@ -126,15 +216,19 @@ class PostgresPrGroupTransaction implements PrGroupLedgerTransaction {
   async insertGroup(group: PrGroupRecord): Promise<boolean> {
     const result = await this.client.query<{ id: string }>(`
       INSERT INTO todos_pr_groups (
-        schema_version, id, identity_key, root_request_id, repository, state,
-        active_attempt_id, active_generation, terminal_attempt_id, terminal_generation,
+        schema_version, id, identity_key, root_request_id, repository,
+        leaf_task_id, branch, pr_number, base_sha, state,
+        active_attempt_id, active_generation, repair_cycle_count, repair_cycle_limit,
+        terminal_attempt_id, terminal_generation,
         terminal_outcome, terminal_head_sha, terminal_at, cleanup_eligible_at,
         revision, created_at, updated_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-      ON CONFLICT (id) DO NOTHING RETURNING id
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+      ON CONFLICT DO NOTHING RETURNING id
     `, [
-      group.schema_version, group.id, group.identity_key, group.root_request_id, group.repository, group.state,
-      group.active_attempt_id, group.active_generation, group.terminal_attempt_id, group.terminal_generation,
+      group.schema_version, group.id, group.identity_key, group.root_request_id, group.repository,
+      group.leaf_task_id, group.branch, group.pr_number, group.base_sha, group.state,
+      group.active_attempt_id, group.active_generation, group.repair_cycle_count, group.repair_cycle_limit,
+      group.terminal_attempt_id, group.terminal_generation,
       group.terminal_outcome, group.terminal_head_sha, group.terminal_at, group.cleanup_eligible_at,
       group.revision, group.created_at, group.updated_at,
     ]);
@@ -144,11 +238,13 @@ class PostgresPrGroupTransaction implements PrGroupLedgerTransaction {
   async updateGroup(group: PrGroupRecord): Promise<void> {
     await this.client.query(`
       UPDATE todos_pr_groups SET state=$1, active_attempt_id=$2, active_generation=$3,
-        terminal_attempt_id=$4, terminal_generation=$5, terminal_outcome=$6,
-        terminal_head_sha=$7, terminal_at=$8, cleanup_eligible_at=$9,
-        revision=$10, updated_at=$11 WHERE id=$12
+        repair_cycle_count=$4, repair_cycle_limit=$5,
+        terminal_attempt_id=$6, terminal_generation=$7, terminal_outcome=$8,
+        terminal_head_sha=$9, terminal_at=$10, cleanup_eligible_at=$11,
+        revision=$12, updated_at=$13 WHERE id=$14
     `, [
       group.state, group.active_attempt_id, group.active_generation,
+      group.repair_cycle_count, group.repair_cycle_limit,
       group.terminal_attempt_id, group.terminal_generation, group.terminal_outcome,
       group.terminal_head_sha, group.terminal_at, group.cleanup_eligible_at,
       group.revision, group.updated_at, group.id,
@@ -175,15 +271,17 @@ class PostgresPrGroupTransaction implements PrGroupLedgerTransaction {
     const result = await this.client.query<{ id: string }>(`
       INSERT INTO todos_pr_group_attempts (
         schema_version,id,group_id,leaf_task_id,dispatch_attempt,writer_generation,
-        previous_attempt_id,worktree,branch,provider,provider_run_id,profile_alias,
+        previous_attempt_id,worktree,branch,repository,pr_number,base_sha,
+        provider,provider_run_id,profile_alias,
         status,admitted_at,started_at,last_heartbeat_at,handed_off_at,fenced_at,
         terminal_at,created_at,updated_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
-      ON CONFLICT (id) DO NOTHING RETURNING id
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+      ON CONFLICT DO NOTHING RETURNING id
     `, [
       attempt.schema_version, attempt.id, attempt.group_id, attempt.leaf_task_id,
       attempt.dispatch_attempt, attempt.writer_generation, attempt.previous_attempt_id,
-      attempt.worktree, attempt.branch, attempt.provider, attempt.provider_run_id,
+      attempt.worktree, attempt.branch, attempt.repository, attempt.pr_number, attempt.base_sha,
+      attempt.provider, attempt.provider_run_id,
       attempt.profile_alias, attempt.status, attempt.admitted_at, attempt.started_at,
       attempt.last_heartbeat_at, attempt.handed_off_at, attempt.fenced_at,
       attempt.terminal_at, attempt.created_at, attempt.updated_at,
@@ -255,13 +353,22 @@ class PostgresPrGroupTransaction implements PrGroupLedgerTransaction {
       INSERT INTO todos_pr_group_events (
         schema_version,id,group_id,attempt_id,writer_generation,sequence,
         idempotency_key,event_type,state,message,head_sha,receipt_key,outcome,
-        metadata,payload_hash,created_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15,$16)
-      ON CONFLICT (id) DO NOTHING RETURNING id
+        review_receipt_key,conditional_merge_receipt_key,repository,pr_number,base_sha,
+        actor_id,actor_run_id,expected_reviewer_id,expected_reviewer_run_id,
+        repair_cycle,cleanup_proof,metadata,payload_hash,created_at
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+        $19,$20,$21,$22,$23,$24::jsonb,$25::jsonb,$26,$27
+      )
+      ON CONFLICT DO NOTHING RETURNING id
     `, [
       event.schema_version, event.id, event.group_id, event.attempt_id,
       event.writer_generation, event.sequence, event.idempotency_key, event.event_type,
       event.state, event.message, event.head_sha, event.receipt_key, event.outcome,
+      event.review_receipt_key, event.conditional_merge_receipt_key,
+      event.repository, event.pr_number, event.base_sha, event.actor_id, event.actor_run_id,
+      event.expected_reviewer_id, event.expected_reviewer_run_id, event.repair_cycle,
+      event.cleanup_proof ? JSON.stringify(event.cleanup_proof) : null,
       JSON.stringify(event.metadata), event.payload_hash, event.created_at,
     ]);
     return result.rows.length === 1;
@@ -289,7 +396,23 @@ export class PostgresPrGroupLedgerPersistence implements PrGroupLedgerPersistenc
         "remote PR-group mutations require an authoritative database transaction",
       );
     }
-    return this.client.transaction((transaction) => fn(new PostgresPrGroupTransaction(transaction)));
+    try {
+      return await this.client.transaction((transaction) => fn(new PostgresPrGroupTransaction(transaction)));
+    } catch (error) {
+      if (error instanceof PrGroupLedgerError) throw error;
+      const pg = error as { code?: unknown; constraint?: unknown };
+      if (pg?.code === "23505") {
+        throw new PrGroupLedgerError(
+          "PR_GROUP_IDENTITY_CONFLICT",
+          "PostgreSQL rejected a conflicting immutable PR-group identity",
+          { constraint: typeof pg.constraint === "string" ? pg.constraint : "unknown" },
+        );
+      }
+      throw new PrGroupLedgerError(
+        "PR_GROUP_ATOMICITY_UNAVAILABLE",
+        "PostgreSQL PR-group transaction failed atomically",
+      );
+    }
   }
 
   async getGroup(id: string): Promise<PrGroupRecord | null> {
@@ -311,7 +434,9 @@ export class PostgresPrGroupLedgerPersistence implements PrGroupLedgerPersistenc
     await this.ensureSchema();
     const result = await this.client.query<Record<string, unknown>>(`
       SELECT * FROM todos_pr_group_events
-      WHERE group_id = $1 AND event_type IN ('review_receipt', 'conditional_merge_receipt')
+      WHERE group_id = $1 AND event_type IN (
+        'review_receipt', 'conditional_merge_receipt', 'merge_outcome', 'cleanup_eligible'
+      )
       ORDER BY sequence ASC LIMIT $2
     `, [groupId, limit]);
     return result.rows.map(eventFromRow);

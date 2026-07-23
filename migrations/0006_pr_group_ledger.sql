@@ -9,9 +9,15 @@ CREATE TABLE IF NOT EXISTS todos_pr_groups (
   identity_key text NOT NULL UNIQUE,
   root_request_id text NOT NULL,
   repository text NOT NULL,
+  leaf_task_id text NOT NULL,
+  branch text NOT NULL,
+  pr_number integer,
+  base_sha text,
   state text NOT NULL,
   active_attempt_id text,
   active_generation text,
+  repair_cycle_count integer NOT NULL DEFAULT 0,
+  repair_cycle_limit integer NOT NULL DEFAULT 2,
   terminal_attempt_id text,
   terminal_generation text,
   terminal_outcome text,
@@ -38,6 +44,9 @@ CREATE TABLE IF NOT EXISTS todos_pr_group_attempts (
   previous_attempt_id text REFERENCES todos_pr_group_attempts(id) ON DELETE SET NULL,
   worktree text NOT NULL,
   branch text NOT NULL,
+  repository text NOT NULL,
+  pr_number integer,
+  base_sha text,
   provider text,
   provider_run_id text,
   profile_alias text,
@@ -72,7 +81,18 @@ CREATE TABLE IF NOT EXISTS todos_pr_group_events (
   message text,
   head_sha text,
   receipt_key text,
+  review_receipt_key text,
+  conditional_merge_receipt_key text,
   outcome text,
+  repository text NOT NULL,
+  pr_number integer,
+  base_sha text,
+  actor_id text,
+  actor_run_id text,
+  expected_reviewer_id text,
+  expected_reviewer_run_id text,
+  repair_cycle integer,
+  cleanup_proof jsonb,
   metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
   payload_hash text NOT NULL,
   created_at timestamptz NOT NULL,
@@ -87,3 +107,84 @@ CREATE INDEX IF NOT EXISTS todos_pr_group_events_attempt_idx
   ON todos_pr_group_events (attempt_id, sequence);
 CREATE INDEX IF NOT EXISTS todos_pr_group_events_receipt_idx
   ON todos_pr_group_events (group_id, receipt_key);
+
+ALTER TABLE todos_pr_groups ADD COLUMN IF NOT EXISTS leaf_task_id text;
+ALTER TABLE todos_pr_groups ADD COLUMN IF NOT EXISTS branch text;
+ALTER TABLE todos_pr_groups ADD COLUMN IF NOT EXISTS pr_number integer;
+ALTER TABLE todos_pr_groups ADD COLUMN IF NOT EXISTS base_sha text;
+ALTER TABLE todos_pr_groups ADD COLUMN IF NOT EXISTS repair_cycle_count integer NOT NULL DEFAULT 0;
+ALTER TABLE todos_pr_groups ADD COLUMN IF NOT EXISTS repair_cycle_limit integer NOT NULL DEFAULT 2;
+ALTER TABLE todos_pr_group_attempts ADD COLUMN IF NOT EXISTS repository text;
+ALTER TABLE todos_pr_group_attempts ADD COLUMN IF NOT EXISTS pr_number integer;
+ALTER TABLE todos_pr_group_attempts ADD COLUMN IF NOT EXISTS base_sha text;
+ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS review_receipt_key text;
+ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS conditional_merge_receipt_key text;
+ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS repository text;
+ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS pr_number integer;
+ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS base_sha text;
+ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS actor_id text;
+ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS actor_run_id text;
+ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS expected_reviewer_id text;
+ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS expected_reviewer_run_id text;
+ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS repair_cycle integer;
+ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS cleanup_proof jsonb;
+
+UPDATE todos_pr_groups AS groups
+SET leaf_task_id = COALESCE(groups.leaf_task_id, (
+      SELECT attempt.leaf_task_id
+      FROM todos_pr_group_attempts AS attempt
+      WHERE attempt.group_id = groups.id
+      ORDER BY CASE WHEN attempt.id = groups.active_attempt_id THEN 0 ELSE 1 END,
+               attempt.created_at ASC, attempt.id ASC
+      LIMIT 1
+    )),
+    branch = COALESCE(groups.branch, (
+      SELECT attempt.branch
+      FROM todos_pr_group_attempts AS attempt
+      WHERE attempt.group_id = groups.id
+      ORDER BY CASE WHEN attempt.id = groups.active_attempt_id THEN 0 ELSE 1 END,
+               attempt.created_at ASC, attempt.id ASC
+      LIMIT 1
+    )),
+    pr_number = COALESCE(groups.pr_number, (
+      SELECT attempt.pr_number
+      FROM todos_pr_group_attempts AS attempt
+      WHERE attempt.group_id = groups.id AND attempt.pr_number IS NOT NULL
+      ORDER BY CASE WHEN attempt.id = groups.active_attempt_id THEN 0 ELSE 1 END,
+               attempt.created_at ASC, attempt.id ASC
+      LIMIT 1
+    )),
+    base_sha = COALESCE(groups.base_sha, (
+      SELECT attempt.base_sha
+      FROM todos_pr_group_attempts AS attempt
+      WHERE attempt.group_id = groups.id AND attempt.base_sha IS NOT NULL
+      ORDER BY CASE WHEN attempt.id = groups.active_attempt_id THEN 0 ELSE 1 END,
+               attempt.created_at ASC, attempt.id ASC
+      LIMIT 1
+    ))
+WHERE groups.leaf_task_id IS NULL
+   OR groups.branch IS NULL
+   OR groups.pr_number IS NULL
+   OR groups.base_sha IS NULL;
+
+UPDATE todos_pr_group_attempts AS attempt
+SET repository = COALESCE(attempt.repository, groups.repository),
+    pr_number = COALESCE(attempt.pr_number, groups.pr_number),
+    base_sha = COALESCE(attempt.base_sha, groups.base_sha)
+FROM todos_pr_groups AS groups
+WHERE groups.id = attempt.group_id
+  AND (attempt.repository IS NULL OR attempt.pr_number IS NULL OR attempt.base_sha IS NULL);
+
+UPDATE todos_pr_group_events AS event
+SET repository = COALESCE(event.repository, attempt.repository, groups.repository),
+    pr_number = COALESCE(event.pr_number, attempt.pr_number, groups.pr_number),
+    base_sha = COALESCE(event.base_sha, attempt.base_sha, groups.base_sha)
+FROM todos_pr_group_attempts AS attempt, todos_pr_groups AS groups
+WHERE attempt.id = event.attempt_id
+  AND groups.id = event.group_id
+  AND (event.repository IS NULL OR event.pr_number IS NULL OR event.base_sha IS NULL);
+
+ALTER TABLE todos_pr_groups ALTER COLUMN leaf_task_id SET NOT NULL;
+ALTER TABLE todos_pr_groups ALTER COLUMN branch SET NOT NULL;
+ALTER TABLE todos_pr_group_attempts ALTER COLUMN repository SET NOT NULL;
+ALTER TABLE todos_pr_group_events ALTER COLUMN repository SET NOT NULL;

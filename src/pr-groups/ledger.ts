@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 import {
   PR_GROUP_LEDGER_SCHEMA_VERSION,
+  PR_GROUP_REPAIR_CYCLE_LIMIT,
   PrGroupLedgerError,
   type AdmitPrGroupInput,
   type AppendPrGroupEventInput,
   type PrGroupAttemptRecord,
   type PrGroupAttemptStatus,
+  type PrGroupCleanupProof,
   type PrGroupEventListOptions,
   type PrGroupEventOutcome,
   type PrGroupEventPage,
@@ -49,43 +51,22 @@ const APPENDABLE_EVENT_TYPES = new Set<AppendPrGroupEventInput["event_type"]>([
 const EVENT_OUTCOMES = new Set<PrGroupEventOutcome>([
   "approved",
   "changes_requested",
+  "dismissed",
   "accepted",
   "rejected",
   "merged",
   "not_merged",
   "cancelled",
   "failed",
+  "no_go",
 ]);
 
-const STATE_RANK: Record<PrGroupState, number> = {
-  admitted: 0,
-  started: 10,
-  in_progress: 20,
-  handed_off: 30,
-  review_requested: 40,
-  reviewed: 50,
-  repair: 55,
-  merge_ready: 60,
-  merge_not_merged: 65,
-  merged: 70,
-  cancelled: 70,
-  failed: 70,
-  cleanup_eligible: 80,
-};
-
-const ATTEMPT_STATUS_RANK: Record<PrGroupAttemptStatus, number> = {
-  admitted: 0,
-  started: 10,
-  in_progress: 20,
-  handed_off: 30,
-  reviewing: 40,
-  repair: 50,
-  merge_ready: 60,
-  fenced: 70,
-  merged: 80,
-  cancelled: 80,
-  failed: 80,
-};
+const RECEIPT_EVENT_TYPES = new Set<PrGroupEventType>([
+  "review_requested",
+  "review_receipt",
+  "conditional_merge_receipt",
+  "merge_outcome",
+]);
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -193,6 +174,22 @@ function normalizeHead(value: string | null | undefined, required: boolean): str
   return head;
 }
 
+function normalizeBaseSha(value: unknown): string | null {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string" || !SHA_PATTERN.test(value.toLowerCase())) {
+    throw new PrGroupLedgerError("PR_GROUP_INVALID_INPUT", "base_sha must be an exact 40-character SHA or null");
+  }
+  return value.toLowerCase();
+}
+
+function normalizePrNumber(value: unknown): number | null {
+  if (value === undefined || value === null) return null;
+  if (!Number.isSafeInteger(value) || Number(value) < 1) {
+    throw new PrGroupLedgerError("PR_GROUP_INVALID_INPUT", "pr_number must be a positive integer or null");
+  }
+  return Number(value);
+}
+
 function sanitizeMetadataValue(value: unknown, key = ""): unknown {
   if (FORBIDDEN_METADATA_KEY.test(key)) return "[REDACTED]";
   if (typeof value === "string") {
@@ -215,10 +212,19 @@ export function sanitizePrGroupMetadata(metadata: Record<string, unknown> | unde
   return (sanitizeMetadataValue(metadata ?? {}) as Record<string, unknown>) ?? {};
 }
 
-export function deterministicPrGroupId(rootRequestId: string, repository: string): string {
+export function deterministicPrGroupId(
+  rootRequestId: string,
+  repository: string,
+  leafTaskId: string,
+  branch: string,
+  prNumber: number | null = null,
+): string {
   const root = requiredReference(rootRequestId, "root_request_id", 256);
   const repo = normalizeRepository(repository);
-  return `prg_${sha256(`pr-group:v1\0${root}\0${repo}`).slice(0, 32)}`;
+  const leaf = safeReference(leafTaskId, "leaf_task_id");
+  const normalizedBranch = safeReference(branch, "branch");
+  const pr = normalizePrNumber(prNumber);
+  return `prg_${sha256(`pr-group:v1\0${root}\0${repo}\0${leaf}\0${normalizedBranch}\0${pr ?? "none"}`).slice(0, 32)}`;
 }
 
 export function deterministicPrGroupAttemptId(
@@ -245,8 +251,8 @@ function stateForEvent(type: PrGroupEventType, outcome: PrGroupEventOutcome | nu
     case "handoff": return "handed_off";
     case "review_requested": return "review_requested";
     case "review_receipt": return "reviewed";
-    case "repair_accepted":
-    case "repair_rejected": return "repair";
+    case "repair_accepted": return "repair";
+    case "repair_rejected": return "no_go";
     case "conditional_merge_receipt": return "merge_ready";
     case "merge_outcome": return outcome === "merged" ? "merged" : "merge_not_merged";
     case "recovery": return "admitted";
@@ -254,8 +260,8 @@ function stateForEvent(type: PrGroupEventType, outcome: PrGroupEventOutcome | nu
     case "failure": return "failed";
     case "cleanup_eligible": return "cleanup_eligible";
     case "terminal_outcome":
-      if (outcome === "merged" || outcome === "cancelled" || outcome === "failed") return outcome;
-      throw new PrGroupLedgerError("PR_GROUP_INVALID_TRANSITION", "terminal_outcome requires merged, cancelled, or failed");
+      if (outcome === "merged" || outcome === "cancelled" || outcome === "failed" || outcome === "no_go") return outcome;
+      throw new PrGroupLedgerError("PR_GROUP_INVALID_TRANSITION", "terminal_outcome requires merged, cancelled, failed, or no_go");
   }
 }
 
@@ -265,8 +271,10 @@ function terminalOutcomeFor(
 ): PrGroupTerminalOutcome | null {
   if (type === "cancellation") return "cancelled";
   if (type === "failure") return "failed";
+  if (type === "repair_rejected") return "no_go";
   if (type === "merge_outcome" && outcome === "merged") return "merged";
-  if (type === "terminal_outcome" && (outcome === "merged" || outcome === "cancelled" || outcome === "failed")) {
+  if (type === "terminal_outcome" &&
+      (outcome === "merged" || outcome === "cancelled" || outcome === "failed" || outcome === "no_go")) {
     return outcome;
   }
   return null;
@@ -284,36 +292,20 @@ function attemptStatusFor(
     case "handoff": return "handed_off";
     case "review_requested":
     case "review_receipt": return "reviewing";
-    case "repair_accepted":
-    case "repair_rejected": return "repair";
+    case "repair_accepted": return "repair";
+    case "repair_rejected": return "no_go";
     case "conditional_merge_receipt": return "merge_ready";
     case "merge_outcome": return outcome === "merged" ? "merged" : "handed_off";
     case "cancellation": return "cancelled";
     case "failure": return "failed";
     case "terminal_outcome":
-      if (outcome === "merged" || outcome === "cancelled" || outcome === "failed") return outcome;
+      if (outcome === "merged" || outcome === "cancelled" || outcome === "failed" || outcome === "no_go") return outcome;
       return current;
     default: return current;
   }
 }
 
-function advanceAttemptStatus(
-  current: PrGroupAttemptStatus,
-  candidate: PrGroupAttemptStatus,
-): PrGroupAttemptStatus {
-  return ATTEMPT_STATUS_RANK[candidate] >= ATTEMPT_STATUS_RANK[current] ? candidate : current;
-}
-
-function payloadForHash(input: {
-  attempt_id: string;
-  writer_generation: string;
-  event_type: PrGroupEventType;
-  message: string | null;
-  head_sha: string | null;
-  receipt_key: string | null;
-  outcome: PrGroupEventOutcome | null;
-  metadata: Record<string, unknown>;
-}): string {
+function payloadForHash(input: Record<string, unknown>): string {
   return sha256(stableJson(input));
 }
 
@@ -343,6 +335,9 @@ function assertAttemptIdentity(
     writer_generation: string;
     worktree: string;
     branch: string;
+    repository: string;
+    pr_number: number | null;
+    base_sha: string | null;
     provider: string | null;
     provider_run_id: string | null;
     profile_alias: string | null;
@@ -354,6 +349,9 @@ function assertAttemptIdentity(
     writer_generation: input.writer_generation,
     worktree: input.worktree,
     branch: input.branch,
+    repository: input.repository,
+    pr_number: input.pr_number,
+    base_sha: input.base_sha,
     provider: input.provider,
     provider_run_id: input.provider_run_id,
     profile_alias: input.profile_alias,
@@ -366,6 +364,127 @@ function assertAttemptIdentity(
         { attempt_id: attempt.id, field: key },
       );
     }
+  }
+}
+
+function assertGroupLineage(
+  group: PrGroupRecord,
+  input: {
+    root_request_id?: string;
+    repository: string;
+    leaf_task_id?: string;
+    branch?: string;
+    pr_number: number | null;
+    base_sha: string | null;
+  },
+): void {
+  const immutable: Record<string, unknown> = {
+    repository: input.repository,
+    pr_number: input.pr_number,
+    base_sha: input.base_sha,
+  };
+  if (input.root_request_id !== undefined) immutable.root_request_id = input.root_request_id;
+  if (input.leaf_task_id !== undefined) immutable.leaf_task_id = input.leaf_task_id;
+  if (input.branch !== undefined) immutable.branch = input.branch;
+  for (const [field, value] of Object.entries(immutable)) {
+    if (group[field as keyof PrGroupRecord] !== value) {
+      throw new PrGroupLedgerError(
+        "PR_GROUP_IDENTITY_CONFLICT",
+        `immutable PR-group lineage conflicts on ${field}`,
+        { group_id: group.id, field },
+      );
+    }
+  }
+}
+
+function normalizeCleanupProof(value: unknown): PrGroupCleanupProof {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new PrGroupLedgerError("PR_GROUP_CLEANUP_BLOCKED", "cleanup requires an explicit durable safety proof");
+  }
+  const proof = value as Record<string, unknown>;
+  const allowed = new Set([
+    "worktree_clean",
+    "provider_reachable",
+    "provider_head_sha",
+    "pr_policy_satisfied",
+    "terminal_disposition",
+    "writer_retired",
+    "review_receipt_key",
+    "conditional_merge_receipt_key",
+    "merge_receipt_key",
+  ]);
+  if (Object.keys(proof).some((key) => !allowed.has(key)) ||
+      proof.worktree_clean !== true ||
+      proof.provider_reachable !== true ||
+      proof.pr_policy_satisfied !== true ||
+      proof.writer_retired !== true) {
+    throw new PrGroupLedgerError("PR_GROUP_CLEANUP_BLOCKED", "cleanup safety proof is incomplete or contradictory");
+  }
+  const terminalDisposition = proof.terminal_disposition;
+  if (!["merged", "cancelled", "failed", "no_go"].includes(String(terminalDisposition))) {
+    throw new PrGroupLedgerError("PR_GROUP_CLEANUP_BLOCKED", "cleanup proof requires a legal terminal disposition");
+  }
+  if (typeof proof.provider_head_sha !== "string" ||
+      !SHA_PATTERN.test(proof.provider_head_sha.toLowerCase())) {
+    throw new PrGroupLedgerError(
+      "PR_GROUP_CLEANUP_BLOCKED",
+      "cleanup proof requires a provider-reachable exact head SHA",
+    );
+  }
+  const providerHeadSha = proof.provider_head_sha.toLowerCase();
+  const optionalReceipt = (field: string): string | null => {
+    const entry = proof[field];
+    return entry === null ? null : safeOptionalReference(entry, field);
+  };
+  return {
+    worktree_clean: true,
+    provider_reachable: true,
+    provider_head_sha: providerHeadSha,
+    pr_policy_satisfied: true,
+    terminal_disposition: terminalDisposition as PrGroupTerminalOutcome,
+    writer_retired: true,
+    review_receipt_key: optionalReceipt("review_receipt_key"),
+    conditional_merge_receipt_key: optionalReceipt("conditional_merge_receipt_key"),
+    merge_receipt_key: optionalReceipt("merge_receipt_key"),
+  };
+}
+
+function assertLegalTransition(group: PrGroupRecord, eventType: PrGroupEventType): void {
+  if (group.terminal_outcome) {
+    if (eventType !== "cleanup_eligible") {
+      throw new PrGroupLedgerError(
+        "PR_GROUP_TERMINAL",
+        "terminal facts are immutable and only one cleanup receipt may follow",
+        { group_id: group.id, terminal_outcome: group.terminal_outcome },
+      );
+    }
+    return;
+  }
+  const allowed: Partial<Record<PrGroupState, ReadonlySet<PrGroupEventType>>> = {
+    admitted: new Set(["started", "progress", "heartbeat", "handoff", "cancellation", "failure", "terminal_outcome"]),
+    started: new Set(["progress", "heartbeat", "handoff", "cancellation", "failure", "terminal_outcome"]),
+    in_progress: new Set(["progress", "heartbeat", "handoff", "cancellation", "failure", "terminal_outcome"]),
+    handed_off: new Set(["review_requested", "cancellation", "failure", "terminal_outcome"]),
+    review_requested: new Set(["review_receipt", "cancellation", "failure", "terminal_outcome"]),
+    reviewed: new Set([
+      "review_receipt",
+      "repair_accepted",
+      "repair_rejected",
+      "conditional_merge_receipt",
+      "cancellation",
+      "failure",
+      "terminal_outcome",
+    ]),
+    repair: new Set(["progress", "heartbeat", "handoff", "repair_rejected", "cancellation", "failure", "terminal_outcome"]),
+    merge_ready: new Set(["merge_outcome", "cancellation", "failure", "terminal_outcome"]),
+    merge_not_merged: new Set(["review_requested", "cancellation", "failure", "terminal_outcome"]),
+  };
+  if (!allowed[group.state]?.has(eventType)) {
+    throw new PrGroupLedgerError(
+      "PR_GROUP_INVALID_TRANSITION",
+      `${eventType} is not legal from ${group.state}`,
+      { group_id: group.id, state: group.state, event_type: eventType },
+    );
   }
 }
 
@@ -397,9 +516,14 @@ export class PrGroupLedger {
       work_run_id: event.attempt_id,
       sequence: event.sequence,
       evidence_type: event.event_type,
+      repository: event.repository,
+      pr_number: event.pr_number,
+      base_sha: event.base_sha,
       head_sha: event.head_sha,
       receipt_key: event.receipt_key,
       outcome: event.outcome,
+      actor_id: event.actor_id,
+      actor_run_id: event.actor_run_id,
       payload_hash: event.payload_hash,
       created_at: event.created_at,
     }));
@@ -412,6 +536,8 @@ export class PrGroupLedger {
       latest_event: latestEvent,
       review_receipts: receipts.filter((event) => event.event_type === "review_receipt"),
       conditional_merge_receipts: receipts.filter((event) => event.event_type === "conditional_merge_receipt"),
+      merge_receipts: receipts.filter((event) => event.event_type === "merge_outcome"),
+      cleanup_receipts: receipts.filter((event) => event.event_type === "cleanup_eligible"),
       cleanup_eligible: group.cleanup_eligible_at !== null,
       adapters: {
         work_runs: attempts.map((attempt) => ({
@@ -424,6 +550,9 @@ export class PrGroupLedger {
           previous_run_id: attempt.previous_attempt_id,
           worktree: attempt.worktree,
           branch: attempt.branch,
+          repository: attempt.repository,
+          pr_number: attempt.pr_number,
+          base_sha: attempt.base_sha,
           provider: attempt.provider,
           provider_run_id: attempt.provider_run_id,
           profile_alias: attempt.profile_alias,
@@ -448,6 +577,8 @@ export class PrGroupLedger {
           state: group.state,
           active_work_run_id: group.active_attempt_id,
           active_writer_generation: group.active_generation,
+          repair_cycle_count: group.repair_cycle_count,
+          repair_cycle_limit: group.repair_cycle_limit,
           terminal_outcome: group.terminal_outcome,
           terminal_head_sha: group.terminal_head_sha,
           cleanup_eligible: group.cleanup_eligible_at !== null,
@@ -502,17 +633,27 @@ export class PrGroupLedger {
     const admittedAt = isoTimestamp(raw.admitted_at, "admitted_at");
     const rootRequestId = safeReference(raw.root_request_id, "root_request_id");
     const repository = normalizeRepository(raw.repository);
-    const groupId = deterministicPrGroupId(rootRequestId, repository);
     const leafTaskId = safeReference(raw.leaf_task_id, "leaf_task_id");
     const dispatchAttempt = safeReference(raw.dispatch_attempt, "dispatch_attempt");
     const writerGeneration = safeReference(raw.writer_generation, "writer_generation");
     const worktree = safeWorktree(raw.worktree);
     const branch = safeReference(raw.branch, "branch");
+    const prNumber = normalizePrNumber(raw.pr_number);
+    const baseSha = normalizeBaseSha(raw.base_sha);
+    if ((prNumber === null) !== (baseSha === null)) {
+      throw new PrGroupLedgerError(
+        "PR_GROUP_INVALID_INPUT",
+        "pr_number and base_sha must be admitted together when PR identity is known",
+      );
+    }
+    const groupId = deterministicPrGroupId(rootRequestId, repository, leafTaskId, branch, prNumber);
     const provider = safeOptionalReference(raw.provider, "provider");
     const providerRunId = safeOptionalReference(raw.provider_run_id, "provider_run_id");
     const profileAlias = safeProfileAlias(raw.profile_alias);
     const attemptId = deterministicPrGroupAttemptId(groupId, leafTaskId, dispatchAttempt);
-    const identityKey = sha256(`pr-group:v1\0${rootRequestId}\0${repository}`);
+    const identityKey = sha256(
+      `pr-group:v1\0${rootRequestId}\0${repository}\0${leafTaskId}\0${branch}\0${prNumber ?? "none"}\0${baseSha ?? "none"}`,
+    );
     const idempotencyKey = `admission:${attemptId}`;
     const metadata = {};
     const eventPayloadHash = payloadForHash({
@@ -522,7 +663,18 @@ export class PrGroupLedger {
       message: null,
       head_sha: null,
       receipt_key: null,
+      review_receipt_key: null,
+      conditional_merge_receipt_key: null,
       outcome: null,
+      repository,
+      pr_number: prNumber,
+      base_sha: baseSha,
+      actor_id: null,
+      actor_run_id: null,
+      expected_reviewer_id: null,
+      expected_reviewer_run_id: null,
+      repair_cycle: null,
+      cleanup_proof: null,
       metadata,
     });
 
@@ -536,9 +688,15 @@ export class PrGroupLedger {
           identity_key: identityKey,
           root_request_id: rootRequestId,
           repository,
+          leaf_task_id: leafTaskId,
+          branch,
+          pr_number: prNumber,
+          base_sha: baseSha,
           state: "admitted",
           active_attempt_id: attemptId,
           active_generation: writerGeneration,
+          repair_cycle_count: 0,
+          repair_cycle_limit: PR_GROUP_REPAIR_CYCLE_LIMIT,
           terminal_attempt_id: null,
           terminal_generation: null,
           terminal_outcome: null,
@@ -555,13 +713,21 @@ export class PrGroupLedger {
       if (!group) {
         throw new PrGroupLedgerError("PR_GROUP_ATOMICITY_UNAVAILABLE", "group create-or-adopt lost its authoritative row");
       }
-      if (group.identity_key !== identityKey || group.root_request_id !== rootRequestId || group.repository !== repository) {
+      if (group.identity_key !== identityKey) {
         throw new PrGroupLedgerError(
           "PR_GROUP_IDENTITY_CONFLICT",
           "deterministic PR group identity conflicts with an existing group",
           { group_id: groupId },
         );
       }
+      assertGroupLineage(group, {
+        root_request_id: rootRequestId,
+        repository,
+        leaf_task_id: leafTaskId,
+        branch,
+        pr_number: prNumber,
+        base_sha: baseSha,
+      });
       if (group.terminal_outcome) {
         throw new PrGroupLedgerError(
           "PR_GROUP_TERMINAL",
@@ -576,6 +742,9 @@ export class PrGroupLedger {
         writer_generation: writerGeneration,
         worktree,
         branch,
+        repository,
+        pr_number: prNumber,
+        base_sha: baseSha,
         provider,
         provider_run_id: providerRunId,
         profile_alias: profileAlias,
@@ -605,6 +774,9 @@ export class PrGroupLedger {
           previous_attempt_id: null,
           worktree,
           branch,
+          repository,
+          pr_number: prNumber,
+          base_sha: baseSha,
           provider,
           provider_run_id: providerRunId,
           profile_alias: profileAlias,
@@ -620,7 +792,12 @@ export class PrGroupLedger {
         };
         if (!await tx.insertAttempt(attempt)) {
           const raced = await tx.getAttempt(attemptId);
-          if (!raced) throw new PrGroupLedgerError("PR_GROUP_ATOMICITY_UNAVAILABLE", "attempt create lost its authoritative row");
+          if (!raced) {
+            throw new PrGroupLedgerError(
+              "PR_GROUP_IDENTITY_CONFLICT",
+              "attempt uniqueness conflicts with another immutable PR-group attempt",
+            );
+          }
           assertAttemptIdentity(raced, identity);
           attempt = raced;
         }
@@ -641,7 +818,18 @@ export class PrGroupLedger {
         message: null,
         head_sha: null,
         receipt_key: null,
+        review_receipt_key: null,
+        conditional_merge_receipt_key: null,
         outcome: null,
+        repository,
+        pr_number: prNumber,
+        base_sha: baseSha,
+        actor_id: null,
+        actor_run_id: null,
+        expected_reviewer_id: null,
+        expected_reviewer_run_id: null,
+        repair_cycle: null,
+        cleanup_proof: null,
         metadata,
         payload_hash: eventPayloadHash,
         created_at: admittedAt,
@@ -659,7 +847,10 @@ export class PrGroupLedger {
 
   async recover(raw: RecoverPrGroupInput): Promise<PrGroupMutationResult> {
     const groupId = requiredReference(raw.group_id, "group_id", 96);
+    const rootRequestId = safeReference(raw.root_request_id, "root_request_id");
+    const repository = normalizeRepository(raw.repository);
     const leafTaskId = safeReference(raw.leaf_task_id, "leaf_task_id");
+    const expectedAttemptId = requiredReference(raw.expected_attempt_id, "expected_attempt_id", 96);
     const dispatchAttempt = safeReference(raw.dispatch_attempt, "dispatch_attempt");
     const expectedGeneration = safeReference(raw.expected_generation, "expected_generation");
     const writerGeneration = safeReference(raw.writer_generation, "writer_generation");
@@ -668,44 +859,65 @@ export class PrGroupLedger {
     }
     const worktree = safeWorktree(raw.worktree);
     const branch = safeReference(raw.branch, "branch");
+    const prNumber = normalizePrNumber(raw.pr_number);
+    const baseSha = normalizeBaseSha(raw.base_sha);
+    if ((prNumber === null) !== (baseSha === null)) {
+      throw new PrGroupLedgerError(
+        "PR_GROUP_INVALID_INPUT",
+        "pr_number and base_sha must be supplied together during recovery",
+      );
+    }
+    const expectedGroupId = deterministicPrGroupId(rootRequestId, repository, leafTaskId, branch, prNumber);
+    if (expectedGroupId !== groupId) {
+      throw new PrGroupLedgerError(
+        "PR_GROUP_IDENTITY_CONFLICT",
+        "recovery lineage derives a different deterministic PR-group identity",
+      );
+    }
     const provider = safeOptionalReference(raw.provider, "provider");
     const providerRunId = safeOptionalReference(raw.provider_run_id, "provider_run_id");
     const profileAlias = safeProfileAlias(raw.profile_alias);
     const idempotencyKey = safeReference(raw.idempotency_key, "idempotency_key");
+    const recoveredAtWasSupplied = raw.recovered_at !== undefined;
     const recoveredAt = isoTimestamp(raw.recovered_at, "recovered_at");
     const attemptId = deterministicPrGroupAttemptId(groupId, leafTaskId, dispatchAttempt);
     const message = safeMessage(raw.message, "message");
     const metadata = sanitizePrGroupMetadata(raw.metadata);
     const eventPayloadHash = payloadForHash({
+      group_id: groupId,
+      root_request_id: rootRequestId,
+      repository,
+      leaf_task_id: leafTaskId,
+      expected_attempt_id: expectedAttemptId,
+      dispatch_attempt: dispatchAttempt,
+      expected_generation: expectedGeneration,
       attempt_id: attemptId,
       writer_generation: writerGeneration,
+      worktree,
+      branch,
+      pr_number: prNumber,
+      base_sha: baseSha,
+      provider,
+      provider_run_id: providerRunId,
+      profile_alias: profileAlias,
+      idempotency_key: idempotencyKey,
       event_type: "recovery",
       message,
-      head_sha: null,
-      receipt_key: null,
-      outcome: null,
       metadata,
+      recovered_at: recoveredAtWasSupplied ? recoveredAt : null,
     });
 
     const result = await this.persistence.transaction(async (tx) => {
       const group = await tx.getGroup(groupId, true);
       if (!group) throw new PrGroupLedgerError("PR_GROUP_NOT_FOUND", `PR group not found: ${groupId}`);
-      if (group.terminal_outcome) {
-        throw new PrGroupLedgerError("PR_GROUP_TERMINAL", "terminal PR group history cannot be recovered", {
-          group_id: groupId,
-          terminal_outcome: group.terminal_outcome,
-        });
-      }
-
-      const existingEvent = await existingEventOrThrow(tx, groupId, idempotencyKey, eventPayloadHash);
-      if (existingEvent) return { event: existingEvent, created: false, adopted: true, appended: false };
-      if (recoveredAt < group.updated_at) {
-        throw new PrGroupLedgerError(
-          "PR_GROUP_INVALID_TRANSITION",
-          "recovery timestamp cannot precede the current authoritative group state",
-          { group_id: groupId, recovered_at: recoveredAt, updated_at: group.updated_at },
-        );
-      }
+      assertGroupLineage(group, {
+        root_request_id: rootRequestId,
+        repository,
+        leaf_task_id: leafTaskId,
+        branch,
+        pr_number: prNumber,
+        base_sha: baseSha,
+      });
       const existingAttempt = await tx.getAttempt(attemptId);
       if (existingAttempt) {
         assertAttemptIdentity(existingAttempt, {
@@ -714,19 +926,75 @@ export class PrGroupLedger {
           writer_generation: writerGeneration,
           worktree,
           branch,
+          repository,
+          pr_number: prNumber,
+          base_sha: baseSha,
           provider,
           provider_run_id: providerRunId,
           profile_alias: profileAlias,
         });
-        if (group.active_attempt_id === attemptId && group.active_generation === writerGeneration) {
+      }
+      const previous = await tx.getAttempt(expectedAttemptId);
+      if (!previous || previous.group_id !== groupId) {
+        throw new PrGroupLedgerError(
+          "PR_GROUP_IDENTITY_CONFLICT",
+          "recovery expected attempt is not owned by this PR group",
+          { group_id: groupId, expected_attempt_id: expectedAttemptId },
+        );
+      }
+      if (previous.writer_generation !== expectedGeneration ||
+          previous.leaf_task_id !== leafTaskId ||
+          previous.branch !== branch ||
+          previous.repository !== repository ||
+          previous.pr_number !== prNumber ||
+          previous.base_sha !== baseSha ||
+          previous.provider !== provider ||
+          previous.profile_alias !== profileAlias) {
+        throw new PrGroupLedgerError(
+          "PR_GROUP_IDENTITY_CONFLICT",
+          "recovery expected attempt lineage or writer fence does not match",
+          { group_id: groupId, expected_attempt_id: expectedAttemptId },
+        );
+      }
+
+      const existingEvent = await existingEventOrThrow(tx, groupId, idempotencyKey, eventPayloadHash);
+      if (existingEvent) {
+        if (!existingAttempt ||
+            existingAttempt.previous_attempt_id !== expectedAttemptId ||
+            group.active_attempt_id !== attemptId ||
+            group.active_generation !== writerGeneration ||
+            existingEvent.attempt_id !== attemptId ||
+            existingEvent.writer_generation !== writerGeneration) {
           throw new PrGroupLedgerError(
             "PR_GROUP_RECEIPT_REPLAY",
-            "recovery attempt already exists but the supplied idempotency key is new",
+            "recovery replay does not match the complete adopted generation lineage",
             { group_id: groupId, attempt_id: attemptId },
           );
         }
+        return { event: existingEvent, created: false, adopted: true, appended: false };
       }
-      if (group.active_generation !== expectedGeneration || !group.active_attempt_id) {
+      if (group.terminal_outcome) {
+        throw new PrGroupLedgerError("PR_GROUP_TERMINAL", "terminal PR group history cannot be recovered", {
+          group_id: groupId,
+          terminal_outcome: group.terminal_outcome,
+        });
+      }
+      if (recoveredAt < group.updated_at) {
+        throw new PrGroupLedgerError(
+          "PR_GROUP_INVALID_TRANSITION",
+          "recovery timestamp cannot precede the current authoritative group state",
+          { group_id: groupId, recovered_at: recoveredAt, updated_at: group.updated_at },
+        );
+      }
+      if (existingAttempt) {
+        throw new PrGroupLedgerError(
+          "PR_GROUP_RECEIPT_REPLAY",
+          "recovery attempt already exists but the supplied idempotency key is new",
+          { group_id: groupId, attempt_id: attemptId },
+        );
+      }
+      if (group.active_generation !== expectedGeneration ||
+          group.active_attempt_id !== expectedAttemptId) {
         throw new PrGroupLedgerError(
           "PR_GROUP_WRITER_FENCED",
           "recovery expected generation does not own the active writer lease",
@@ -736,10 +1004,6 @@ export class PrGroupLedger {
             active_generation: group.active_generation,
           },
         );
-      }
-      const previous = await tx.getAttempt(group.active_attempt_id);
-      if (!previous) {
-        throw new PrGroupLedgerError("PR_GROUP_ATOMICITY_UNAVAILABLE", "active attempt record is missing");
       }
       previous.status = "fenced";
       previous.fenced_at = recoveredAt;
@@ -756,6 +1020,9 @@ export class PrGroupLedger {
         previous_attempt_id: previous.id,
         worktree,
         branch,
+        repository,
+        pr_number: prNumber,
+        base_sha: baseSha,
         provider,
         provider_run_id: providerRunId,
         profile_alias: profileAlias,
@@ -792,7 +1059,18 @@ export class PrGroupLedger {
         message,
         head_sha: null,
         receipt_key: null,
+        review_receipt_key: null,
+        conditional_merge_receipt_key: null,
         outcome: null,
+        repository,
+        pr_number: prNumber,
+        base_sha: baseSha,
+        actor_id: null,
+        actor_run_id: null,
+        expected_reviewer_id: null,
+        expected_reviewer_run_id: null,
+        repair_cycle: null,
+        cleanup_proof: null,
         metadata: { ...metadata, previous_attempt_id: previous.id },
         payload_hash: eventPayloadHash,
         created_at: recoveredAt,
@@ -811,69 +1089,159 @@ export class PrGroupLedger {
     const attemptId = requiredReference(raw.attempt_id, "attempt_id", 96);
     const writerGeneration = safeReference(raw.writer_generation, "writer_generation");
     const idempotencyKey = safeReference(raw.idempotency_key, "idempotency_key");
+    const createdAtWasSupplied = raw.created_at !== undefined;
     const createdAt = isoTimestamp(raw.created_at, "created_at");
     const eventType = raw.event_type;
     if (!APPENDABLE_EVENT_TYPES.has(eventType)) {
       throw new PrGroupLedgerError("PR_GROUP_INVALID_INPUT", "event_type is not a supported append-only lifecycle event");
     }
-    const exactHeadRequired = [
-      "review_requested",
-      "review_receipt",
-      "conditional_merge_receipt",
-      "merge_outcome",
-    ].includes(eventType);
-    const headSha = normalizeHead(raw.head_sha, exactHeadRequired);
+    const headSha = normalizeHead(raw.head_sha, RECEIPT_EVENT_TYPES.has(eventType));
     const receiptKey = safeOptionalReference(raw.receipt_key, "receipt_key");
+    const reviewReceiptKey = safeOptionalReference(raw.review_receipt_key, "review_receipt_key");
+    const conditionalMergeReceiptKey = safeOptionalReference(
+      raw.conditional_merge_receipt_key,
+      "conditional_merge_receipt_key",
+    );
     const outcome = raw.outcome ?? null;
     if (outcome !== null && !EVENT_OUTCOMES.has(outcome)) {
       throw new PrGroupLedgerError("PR_GROUP_INVALID_INPUT", "outcome is not supported for PR-group events");
     }
     const message = safeMessage(raw.message, "message");
     const metadata = sanitizePrGroupMetadata(raw.metadata);
-    if ((eventType === "review_receipt" || eventType === "conditional_merge_receipt") && !receiptKey) {
+    const suppliedRepository = raw.repository === undefined ? null : normalizeRepository(raw.repository);
+    const suppliedPrNumber = raw.pr_number === undefined ? undefined : normalizePrNumber(raw.pr_number);
+    const suppliedBaseSha = raw.base_sha === undefined ? undefined : normalizeBaseSha(raw.base_sha);
+    let actorId = safeOptionalReference(raw.actor_id, "actor_id");
+    let actorRunId = safeOptionalReference(raw.actor_run_id, "actor_run_id");
+    const authenticatedActorId = safeOptionalReference(raw.authenticated_actor_id, "authenticated_actor_id");
+    const authenticatedActorRunId = safeOptionalReference(
+      raw.authenticated_actor_run_id,
+      "authenticated_actor_run_id",
+    );
+    if (authenticatedActorId) {
+      if (actorId && actorId !== authenticatedActorId) {
+        throw new PrGroupLedgerError(
+          "PR_GROUP_IDENTITY_CONFLICT",
+          "event actor does not match the authenticated server principal",
+        );
+      }
+      actorId = authenticatedActorId;
+    }
+    if (authenticatedActorRunId) {
+      if (actorRunId && actorRunId !== authenticatedActorRunId) {
+        throw new PrGroupLedgerError(
+          "PR_GROUP_IDENTITY_CONFLICT",
+          "event actor run does not match the authenticated server principal",
+        );
+      }
+      actorRunId = authenticatedActorRunId;
+    }
+    const expectedReviewerId = safeOptionalReference(raw.expected_reviewer_id, "expected_reviewer_id");
+    const expectedReviewerRunId = safeOptionalReference(
+      raw.expected_reviewer_run_id,
+      "expected_reviewer_run_id",
+    );
+    const repairCycle = raw.repair_cycle === undefined || raw.repair_cycle === null
+      ? null
+      : Number(raw.repair_cycle);
+    if (repairCycle !== null && (!Number.isSafeInteger(repairCycle) || repairCycle < 1)) {
+      throw new PrGroupLedgerError("PR_GROUP_INVALID_INPUT", "repair_cycle must be a positive integer");
+    }
+    const cleanupProof = eventType === "cleanup_eligible"
+      ? normalizeCleanupProof(raw.cleanup_proof)
+      : null;
+    if (eventType !== "cleanup_eligible" && raw.cleanup_proof !== undefined && raw.cleanup_proof !== null) {
+      throw new PrGroupLedgerError("PR_GROUP_INVALID_INPUT", "cleanup_proof is reserved for cleanup_eligible");
+    }
+
+    if (["review_receipt", "conditional_merge_receipt", "merge_outcome"].includes(eventType) && !receiptKey) {
       throw new PrGroupLedgerError("PR_GROUP_INVALID_INPUT", `${eventType} requires receipt_key`);
     }
-    if (receiptKey && eventType !== "review_receipt" && eventType !== "conditional_merge_receipt") {
+    if (receiptKey && !["review_receipt", "conditional_merge_receipt", "merge_outcome"].includes(eventType)) {
       throw new PrGroupLedgerError(
         "PR_GROUP_INVALID_INPUT",
-        "receipt_key is reserved for review and conditional merge receipts",
+        "receipt_key is reserved for review, conditional merge, and merge receipts",
       );
     }
-    if (eventType === "review_receipt" && outcome !== "approved" && outcome !== "changes_requested") {
-      throw new PrGroupLedgerError("PR_GROUP_INVALID_INPUT", "review_receipt outcome must be approved or changes_requested");
+    if (eventType === "review_receipt" &&
+        outcome !== "approved" && outcome !== "changes_requested" && outcome !== "dismissed") {
+      throw new PrGroupLedgerError(
+        "PR_GROUP_INVALID_TRANSITION",
+        "review_receipt outcome must be approved, changes_requested, or dismissed",
+      );
     }
     if (eventType === "merge_outcome" && outcome !== "merged" && outcome !== "not_merged") {
-      throw new PrGroupLedgerError("PR_GROUP_INVALID_INPUT", "merge_outcome outcome must be merged or not_merged");
+      throw new PrGroupLedgerError("PR_GROUP_INVALID_TRANSITION", "merge_outcome outcome must be merged or not_merged");
     }
-    if (eventType === "repair_accepted" && outcome !== null && outcome !== "accepted") {
-      throw new PrGroupLedgerError("PR_GROUP_INVALID_INPUT", "repair_accepted outcome must be accepted");
+    if (eventType === "repair_accepted" && outcome !== "accepted") {
+      throw new PrGroupLedgerError("PR_GROUP_INVALID_TRANSITION", "repair_accepted outcome must be accepted");
     }
-    if (eventType === "repair_rejected" && outcome !== null && outcome !== "rejected") {
-      throw new PrGroupLedgerError("PR_GROUP_INVALID_INPUT", "repair_rejected outcome must be rejected");
+    if (eventType === "repair_rejected" && outcome !== "rejected") {
+      throw new PrGroupLedgerError("PR_GROUP_INVALID_TRANSITION", "repair_rejected outcome must be rejected");
     }
-    const payloadHash = payloadForHash({
-      attempt_id: attemptId,
-      writer_generation: writerGeneration,
-      event_type: eventType,
-      message,
-      head_sha: headSha,
-      receipt_key: receiptKey,
-      outcome,
-      metadata,
-    });
+    if (eventType === "cancellation" && outcome !== null && outcome !== "cancelled") {
+      throw new PrGroupLedgerError("PR_GROUP_INVALID_TRANSITION", "cancellation outcome must be cancelled or omitted");
+    }
+    if (eventType === "failure" && outcome !== null && outcome !== "failed") {
+      throw new PrGroupLedgerError("PR_GROUP_INVALID_TRANSITION", "failure outcome must be failed or omitted");
+    }
+    if (eventType === "terminal_outcome" &&
+        outcome !== "cancelled" && outcome !== "failed" && outcome !== "no_go") {
+      throw new PrGroupLedgerError(
+        "PR_GROUP_INVALID_TRANSITION",
+        "merged terminal outcomes require merge_outcome and all other terminal outcomes must be cancelled, failed, or no_go",
+      );
+    }
+    const noOutcomeEvents = new Set<PrGroupEventType>([
+      "started",
+      "progress",
+      "heartbeat",
+      "handoff",
+      "review_requested",
+      "conditional_merge_receipt",
+      "cleanup_eligible",
+    ]);
+    if (noOutcomeEvents.has(eventType) && outcome !== null) {
+      throw new PrGroupLedgerError("PR_GROUP_INVALID_TRANSITION", `${eventType} cannot carry an outcome`);
+    }
+    if (eventType === "conditional_merge_receipt" && !reviewReceiptKey) {
+      throw new PrGroupLedgerError(
+        "PR_GROUP_INVALID_INPUT",
+        "conditional_merge_receipt requires review_receipt_key",
+      );
+    }
+    if (eventType === "merge_outcome" && !conditionalMergeReceiptKey) {
+      throw new PrGroupLedgerError(
+        "PR_GROUP_INVALID_INPUT",
+        "merge_outcome requires conditional_merge_receipt_key",
+      );
+    }
+    if (eventType !== "conditional_merge_receipt" && reviewReceiptKey) {
+      throw new PrGroupLedgerError("PR_GROUP_INVALID_INPUT", "review_receipt_key is reserved for conditional merge");
+    }
+    if (eventType !== "merge_outcome" && conditionalMergeReceiptKey) {
+      throw new PrGroupLedgerError(
+        "PR_GROUP_INVALID_INPUT",
+        "conditional_merge_receipt_key is reserved for merge outcomes",
+      );
+    }
+    if (!["repair_accepted", "repair_rejected"].includes(eventType) && repairCycle !== null) {
+      throw new PrGroupLedgerError("PR_GROUP_INVALID_INPUT", "repair_cycle is reserved for repair accounting events");
+    }
+    if (["repair_accepted", "repair_rejected"].includes(eventType) && repairCycle === null) {
+      throw new PrGroupLedgerError("PR_GROUP_INVALID_INPUT", `${eventType} requires repair_cycle`);
+    }
+    if (["review_receipt", "conditional_merge_receipt", "merge_outcome"].includes(eventType) &&
+        (!actorId || !actorRunId)) {
+      throw new PrGroupLedgerError(
+        "PR_GROUP_INVALID_INPUT",
+        `${eventType} requires exact actor and actor-run identities`,
+      );
+    }
 
     const result = await this.persistence.transaction(async (tx) => {
       const group = await tx.getGroup(groupId, true);
       if (!group) throw new PrGroupLedgerError("PR_GROUP_NOT_FOUND", `PR group not found: ${groupId}`);
-      const existing = await existingEventOrThrow(tx, groupId, idempotencyKey, payloadHash);
-      if (existing) return { event: existing, created: false, adopted: true, appended: false };
-      if (createdAt < group.updated_at) {
-        throw new PrGroupLedgerError(
-          "PR_GROUP_INVALID_TRANSITION",
-          "event timestamp cannot precede the current authoritative group state",
-          { group_id: groupId, created_at: createdAt, updated_at: group.updated_at },
-        );
-      }
       const attempt = await tx.getAttempt(attemptId);
       if (!attempt || attempt.group_id !== groupId) {
         throw new PrGroupLedgerError("PR_GROUP_NOT_FOUND", `PR group attempt not found: ${attemptId}`);
@@ -885,9 +1253,62 @@ export class PrGroupLedger {
         });
       }
 
-      const terminalFollowup = eventType === "cleanup_eligible" || eventType === "terminal_outcome";
+      if (attempt.repository !== group.repository ||
+          attempt.leaf_task_id !== group.leaf_task_id ||
+          attempt.branch !== group.branch ||
+          attempt.pr_number !== group.pr_number ||
+          attempt.base_sha !== group.base_sha) {
+        throw new PrGroupLedgerError(
+          "PR_GROUP_IDENTITY_CONFLICT",
+          "attempt lineage does not match its owning PR group",
+          { group_id: groupId, attempt_id: attemptId },
+        );
+      }
+
+      if (RECEIPT_EVENT_TYPES.has(eventType)) {
+        if (!suppliedRepository || suppliedPrNumber === undefined || suppliedBaseSha === undefined) {
+          throw new PrGroupLedgerError(
+            "PR_GROUP_IDENTITY_CONFLICT",
+            `${eventType} requires the complete repository, PR, and base lineage`,
+          );
+        }
+        assertGroupLineage(group, {
+          repository: suppliedRepository,
+          pr_number: suppliedPrNumber,
+          base_sha: suppliedBaseSha,
+        });
+      }
+      const eventRepository = group.repository;
+      const eventPrNumber = group.pr_number;
+      const eventBaseSha = group.base_sha;
+      const payloadHash = payloadForHash({
+        group_id: groupId,
+        attempt_id: attemptId,
+        writer_generation: writerGeneration,
+        idempotency_key: idempotencyKey,
+        event_type: eventType,
+        message,
+        head_sha: headSha,
+        receipt_key: receiptKey,
+        review_receipt_key: reviewReceiptKey,
+        conditional_merge_receipt_key: conditionalMergeReceiptKey,
+        outcome,
+        repository: eventRepository,
+        pr_number: eventPrNumber,
+        base_sha: eventBaseSha,
+        actor_id: actorId,
+        actor_run_id: actorRunId,
+        expected_reviewer_id: expectedReviewerId,
+        expected_reviewer_run_id: expectedReviewerRunId,
+        repair_cycle: repairCycle,
+        cleanup_proof: cleanupProof,
+        metadata,
+        created_at: createdAtWasSupplied ? createdAt : null,
+      });
+      const existing = await existingEventOrThrow(tx, groupId, idempotencyKey, payloadHash);
+      if (existing) return { event: existing, created: false, adopted: true, appended: false };
       if (group.terminal_outcome) {
-        if (!terminalFollowup ||
+        if (eventType !== "cleanup_eligible" ||
             group.terminal_attempt_id !== attemptId ||
             group.terminal_generation !== writerGeneration) {
           throw new PrGroupLedgerError(
@@ -908,11 +1329,28 @@ export class PrGroupLedger {
           },
         );
       }
+      if (createdAt < group.updated_at) {
+        throw new PrGroupLedgerError(
+          "PR_GROUP_INVALID_TRANSITION",
+          "event timestamp cannot precede the current authoritative group state",
+          { group_id: groupId, created_at: createdAt, updated_at: group.updated_at },
+        );
+      }
 
       if (receiptKey) {
-        const receiptReplay =
-          await tx.findEvent(groupId, { event_type: "review_receipt", receipt_key: receiptKey }) ??
-          await tx.findEvent(groupId, { event_type: "conditional_merge_receipt", receipt_key: receiptKey });
+        const receiptReplay = await tx.findEvent(groupId, {
+          event_type: eventType,
+          receipt_key: receiptKey,
+        }) ?? await tx.findEvent(groupId, {
+          event_type: "review_receipt",
+          receipt_key: receiptKey,
+        }) ?? await tx.findEvent(groupId, {
+          event_type: "conditional_merge_receipt",
+          receipt_key: receiptKey,
+        }) ?? await tx.findEvent(groupId, {
+          event_type: "merge_outcome",
+          receipt_key: receiptKey,
+        });
         if (receiptReplay) {
           throw new PrGroupLedgerError(
             "PR_GROUP_RECEIPT_REPLAY",
@@ -921,6 +1359,8 @@ export class PrGroupLedger {
           );
         }
       }
+      assertLegalTransition(group, eventType);
+      let latestReview: PrGroupEventRecord | null = null;
       if (eventType === "review_receipt") {
         const request = await tx.findEvent(groupId, {
           event_type: "review_requested",
@@ -934,18 +1374,27 @@ export class PrGroupLedger {
             { group_id: groupId, attempt_id: attemptId, head_sha: headSha },
           );
         }
+        if ((request.expected_reviewer_id && request.expected_reviewer_id !== actorId) ||
+            (request.expected_reviewer_run_id && request.expected_reviewer_run_id !== actorRunId)) {
+          throw new PrGroupLedgerError(
+            "PR_GROUP_IDENTITY_CONFLICT",
+            "review receipt actor/run does not match the requested reviewer authority",
+            { group_id: groupId, attempt_id: attemptId },
+          );
+        }
       }
       if (eventType === "conditional_merge_receipt") {
-        const review = await tx.findEvent(groupId, {
+        latestReview = await tx.findEvent(groupId, {
           event_type: "review_receipt",
           attempt_id: attemptId,
           head_sha: headSha,
-          outcome: "approved",
         });
-        if (!review) {
+        if (!latestReview ||
+            latestReview.outcome !== "approved" ||
+            latestReview.receipt_key !== reviewReceiptKey) {
           throw new PrGroupLedgerError(
             "PR_GROUP_REVIEW_REQUIRED",
-            "conditional merge receipt requires an approved exact-head review receipt",
+            "conditional merge requires the latest sequence-aware review to be the bound exact-head approval",
             { group_id: groupId, attempt_id: attemptId, head_sha: headSha },
           );
         }
@@ -955,21 +1404,47 @@ export class PrGroupLedger {
           event_type: "conditional_merge_receipt",
           attempt_id: attemptId,
           head_sha: headSha,
+          receipt_key: conditionalMergeReceiptKey!,
         });
-        if (!mergeReceipt) {
+        if (!mergeReceipt ||
+            mergeReceipt.actor_id !== actorId ||
+            mergeReceipt.actor_run_id !== actorRunId) {
           throw new PrGroupLedgerError(
             "PR_GROUP_MERGE_RECEIPT_REQUIRED",
-            "merge outcome requires a conditional merge receipt for the same exact head",
+            "merge outcome requires the bound exact-head conditional receipt from the same actor/run",
             { group_id: groupId, attempt_id: attemptId, head_sha: headSha },
           );
         }
       }
-      if (eventType === "terminal_outcome") {
-        if (outcome !== group.terminal_outcome) {
+      if (eventType === "repair_accepted" || eventType === "repair_rejected") {
+        latestReview = await tx.findEvent(groupId, {
+          event_type: "review_receipt",
+          attempt_id: attemptId,
+        });
+        if (!latestReview ||
+            (latestReview.outcome !== "changes_requested" && latestReview.outcome !== "dismissed")) {
           throw new PrGroupLedgerError(
-            "PR_GROUP_TERMINAL",
-            "terminal outcome evidence cannot change the recorded outcome",
-            { recorded: group.terminal_outcome, attempted: outcome },
+            "PR_GROUP_INVALID_TRANSITION",
+            "repair accounting requires the latest review to be non-approving",
+          );
+        }
+        if (eventType === "repair_accepted" &&
+            (group.repair_cycle_count >= group.repair_cycle_limit ||
+             repairCycle !== group.repair_cycle_count + 1)) {
+          throw new PrGroupLedgerError(
+            "PR_GROUP_INVALID_TRANSITION",
+            "repair cycle must advance exactly once and cannot exceed the acceptance-scope limit",
+            {
+              repair_cycle_count: group.repair_cycle_count,
+              repair_cycle_limit: group.repair_cycle_limit,
+              attempted_cycle: repairCycle,
+            },
+          );
+        }
+        if (eventType === "repair_rejected" && repairCycle !== group.repair_cycle_count) {
+          throw new PrGroupLedgerError(
+            "PR_GROUP_INVALID_TRANSITION",
+            "repair rejection must bind the current durable repair cycle",
           );
         }
       }
@@ -984,32 +1459,51 @@ export class PrGroupLedger {
         if (!group.terminal_outcome || group.active_generation !== null || group.active_attempt_id !== null) {
           throw new PrGroupLedgerError("PR_GROUP_CLEANUP_BLOCKED", "cleanup requires a terminal group with no active writer");
         }
+        if (!cleanupProof ||
+            cleanupProof.terminal_disposition !== group.terminal_outcome ||
+            (group.terminal_head_sha !== null && cleanupProof.provider_head_sha !== group.terminal_head_sha)) {
+          throw new PrGroupLedgerError(
+            "PR_GROUP_CLEANUP_BLOCKED",
+            "cleanup proof does not match the immutable terminal disposition and exact head",
+          );
+        }
         if (group.terminal_outcome === "merged") {
           const head = group.terminal_head_sha;
           const review = await tx.findEvent(groupId, {
             event_type: "review_receipt",
             head_sha: head,
             outcome: "approved",
+            receipt_key: cleanupProof.review_receipt_key ?? undefined,
           });
           const conditional = await tx.findEvent(groupId, {
             event_type: "conditional_merge_receipt",
             head_sha: head,
+            receipt_key: cleanupProof.conditional_merge_receipt_key ?? undefined,
           });
           const merged = await tx.findEvent(groupId, {
             event_type: "merge_outcome",
             head_sha: head,
             outcome: "merged",
+            receipt_key: cleanupProof.merge_receipt_key ?? undefined,
           });
-          if (!review || !conditional || !merged) {
+          if (!cleanupProof.review_receipt_key ||
+              !cleanupProof.conditional_merge_receipt_key ||
+              !cleanupProof.merge_receipt_key ||
+              !review || !conditional || !merged ||
+              conditional.review_receipt_key !== review.receipt_key ||
+              merged.conditional_merge_receipt_key !== conditional.receipt_key) {
             throw new PrGroupLedgerError(
               "PR_GROUP_CLEANUP_BLOCKED",
-              "merged cleanup requires approved review, conditional merge, and merge outcome receipts at the terminal head",
+              "merged cleanup requires the exact bound review, conditional merge, and merge receipts",
             );
           }
         }
       }
 
-      const state = stateForEvent(eventType, outcome);
+      const reviewExhausted = eventType === "review_receipt" &&
+        outcome !== "approved" &&
+        group.repair_cycle_count >= group.repair_cycle_limit;
+      const state = reviewExhausted ? "no_go" : stateForEvent(eventType, outcome);
       const event: PrGroupEventRecord = {
         schema_version: PR_GROUP_LEDGER_SCHEMA_VERSION,
         id: deterministicEventId(groupId, idempotencyKey),
@@ -1023,7 +1517,18 @@ export class PrGroupLedger {
         message,
         head_sha: headSha,
         receipt_key: receiptKey,
+        review_receipt_key: reviewReceiptKey,
+        conditional_merge_receipt_key: conditionalMergeReceiptKey,
         outcome,
+        repository: eventRepository,
+        pr_number: eventPrNumber,
+        base_sha: eventBaseSha,
+        actor_id: actorId,
+        actor_run_id: actorRunId,
+        expected_reviewer_id: expectedReviewerId,
+        expected_reviewer_run_id: expectedReviewerRunId,
+        repair_cycle: repairCycle,
+        cleanup_proof: cleanupProof,
         metadata,
         payload_hash: payloadHash,
         created_at: createdAt,
@@ -1034,16 +1539,17 @@ export class PrGroupLedger {
         throw new PrGroupLedgerError("PR_GROUP_ATOMICITY_UNAVAILABLE", "event append was not durable");
       }
 
-      if (STATE_RANK[state] >= STATE_RANK[group.state]) group.state = state;
-      const terminalOutcome = terminalOutcomeFor(eventType, outcome);
+      group.state = state;
+      if (eventType === "repair_accepted") group.repair_cycle_count = repairCycle!;
+      const terminalOutcome = reviewExhausted
+        ? "no_go"
+        : terminalOutcomeFor(eventType, outcome);
       if (terminalOutcome) {
-        if (group.terminal_outcome && group.terminal_outcome !== terminalOutcome) {
-          throw new PrGroupLedgerError("PR_GROUP_TERMINAL", "terminal outcome cannot regress or change");
-        }
         group.terminal_outcome = terminalOutcome;
         group.terminal_attempt_id = attemptId;
         group.terminal_generation = writerGeneration;
-        group.terminal_head_sha = terminalOutcome === "merged" ? headSha : null;
+        group.terminal_head_sha =
+          terminalOutcome === "merged" || terminalOutcome === "no_go" ? headSha : null;
         group.terminal_at = createdAt;
         group.active_attempt_id = null;
         group.active_generation = null;
@@ -1053,10 +1559,9 @@ export class PrGroupLedger {
       group.updated_at = createdAt;
       await tx.updateGroup(group);
 
-      attempt.status = advanceAttemptStatus(
-        attempt.status,
-        attemptStatusFor(eventType, outcome, attempt.status),
-      );
+      attempt.status = reviewExhausted
+        ? "no_go"
+        : attemptStatusFor(eventType, outcome, attempt.status);
       if (eventType === "started" && !attempt.started_at) attempt.started_at = createdAt;
       if (eventType === "heartbeat" || eventType === "progress") attempt.last_heartbeat_at = createdAt;
       if (eventType === "handoff") attempt.handed_off_at = createdAt;
