@@ -354,6 +354,164 @@ export function buildV1OpenApiDocument(version = getPackageVersion()) {
             metadata: { type: "object", additionalProperties: true },
           },
         },
+        PrGroupStateView: {
+          type: "object",
+          required: [
+            "schema_version", "authoritative", "authority", "group", "attempts",
+            "latest_event", "review_receipts", "conditional_merge_receipts",
+            "cleanup_eligible", "adapters", "diagnostics",
+          ],
+          properties: {
+            schema_version: { type: "integer", const: 1 },
+            authoritative: { type: "boolean", const: true },
+            authority: { type: "string", enum: ["local", "remote"] },
+            group: { type: "object", additionalProperties: true },
+            attempts: { type: "array", items: { type: "object", additionalProperties: true } },
+            latest_event: { type: "object", nullable: true, additionalProperties: true },
+            review_receipts: { type: "array", items: { type: "object", additionalProperties: true } },
+            conditional_merge_receipts: { type: "array", items: { type: "object", additionalProperties: true } },
+            cleanup_eligible: { type: "boolean" },
+            adapters: {
+              type: "object",
+              required: ["work_runs", "evidence_refs", "proof_bundle", "decision_envelope"],
+              properties: {
+                work_runs: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: true } },
+                evidence_refs: { type: "array", maxItems: 500, items: { type: "object", additionalProperties: true } },
+                proof_bundle: { type: "object", additionalProperties: true },
+                decision_envelope: { type: "object", additionalProperties: true },
+              },
+            },
+            diagnostics: {
+              type: "object",
+              required: ["event_count", "attempts_omitted", "receipt_history_complete", "projection_limits"],
+              additionalProperties: true,
+              properties: {
+                event_count: { type: "integer", minimum: 0 },
+                attempts_omitted: { type: "boolean" },
+                receipt_history_complete: { type: "boolean" },
+                projection_limits: { type: "object", additionalProperties: true },
+              },
+            },
+          },
+        },
+        PrGroupStateResponse: {
+          type: "object",
+          required: ["view"],
+          properties: {
+            view: { $ref: "#/components/schemas/PrGroupStateView" },
+          },
+        },
+        PrGroupEventPage: {
+          type: "object",
+          required: [
+            "schema_version", "authoritative", "authority", "group_id", "events",
+            "count", "has_more", "next_sequence",
+          ],
+          properties: {
+            schema_version: { type: "integer", const: 1 },
+            authoritative: { type: "boolean", const: true },
+            authority: { type: "string", enum: ["local", "remote"] },
+            group_id: { type: "string" },
+            events: { type: "array", maxItems: 500, items: { type: "object", additionalProperties: true } },
+            count: { type: "integer", minimum: 0, maximum: 500 },
+            has_more: { type: "boolean" },
+            next_sequence: { type: "integer", nullable: true },
+          },
+        },
+        PrGroupEventHistoryResponse: {
+          type: "object",
+          required: ["history"],
+          properties: {
+            history: { $ref: "#/components/schemas/PrGroupEventPage" },
+          },
+        },
+        AdmitPrGroupInput: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "root_request_id", "repository", "leaf_task_id", "dispatch_attempt",
+            "writer_generation", "worktree", "branch",
+          ],
+          properties: {
+            root_request_id: { type: "string", minLength: 1 },
+            repository: { type: "string", minLength: 3 },
+            leaf_task_id: { type: "string", minLength: 1 },
+            dispatch_attempt: { type: "string", minLength: 1 },
+            writer_generation: { type: "string", minLength: 1 },
+            worktree: { type: "string", minLength: 1 },
+            branch: { type: "string", minLength: 1 },
+            provider: { type: "string", nullable: true },
+            provider_run_id: { type: "string", nullable: true },
+            profile_alias: { type: "string", nullable: true },
+            admitted_at: { type: "string" },
+          },
+        },
+        RecoverPrGroupInput: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "leaf_task_id", "dispatch_attempt", "expected_generation",
+            "writer_generation", "worktree", "branch", "idempotency_key",
+          ],
+          properties: {
+            leaf_task_id: { type: "string" },
+            dispatch_attempt: { type: "string" },
+            expected_generation: { type: "string" },
+            writer_generation: { type: "string" },
+            worktree: { type: "string" },
+            branch: { type: "string" },
+            provider: { type: "string", nullable: true },
+            provider_run_id: { type: "string", nullable: true },
+            profile_alias: { type: "string", nullable: true },
+            idempotency_key: { type: "string" },
+            message: { type: "string", nullable: true },
+            metadata: { type: "object", additionalProperties: true },
+            recovered_at: { type: "string" },
+          },
+        },
+        AppendPrGroupEventInput: {
+          type: "object",
+          additionalProperties: false,
+          required: ["attempt_id", "writer_generation", "idempotency_key", "event_type"],
+          properties: {
+            attempt_id: { type: "string" },
+            writer_generation: { type: "string" },
+            idempotency_key: { type: "string" },
+            event_type: {
+              type: "string",
+              enum: [
+                "started", "progress", "heartbeat", "handoff", "review_requested",
+                "review_receipt", "repair_accepted", "repair_rejected",
+                "conditional_merge_receipt", "merge_outcome", "cancellation",
+                "failure", "cleanup_eligible", "terminal_outcome",
+              ],
+            },
+            message: { type: "string", nullable: true },
+            head_sha: { type: "string", nullable: true },
+            receipt_key: { type: "string", nullable: true },
+            outcome: {
+              type: "string",
+              nullable: true,
+              enum: [
+                "approved", "changes_requested", "accepted", "rejected",
+                "merged", "not_merged", "cancelled", "failed",
+              ],
+            },
+            metadata: { type: "object", additionalProperties: true },
+            created_at: { type: "string" },
+          },
+        },
+        PrGroupMutationResult: {
+          type: "object",
+          required: ["created", "adopted", "appended", "view", "event"],
+          properties: {
+            created: { type: "boolean" },
+            adopted: { type: "boolean" },
+            appended: { type: "boolean" },
+            view: { $ref: "#/components/schemas/PrGroupStateView" },
+            event: { type: "object", additionalProperties: true },
+          },
+        },
       },
     },
     security: [{ apiKey: [] }],
@@ -739,6 +897,74 @@ export function buildV1OpenApiDocument(version = getPackageVersion()) {
           summary: "Delete a task list",
           parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
           responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { deleted: { type: "boolean" }, id: { type: "string" } } } } } } },
+        },
+      },
+      "/v1/pr-groups/admit": {
+        post: {
+          operationId: "admitPrGroup",
+          summary: "Create or idempotently adopt a deterministic PR group attempt",
+          requestBody: {
+            required: true,
+            content: { "application/json": { schema: { $ref: "#/components/schemas/AdmitPrGroupInput" } } },
+          },
+          responses: {
+            "201": { content: { "application/json": { schema: { $ref: "#/components/schemas/PrGroupMutationResult" } } } },
+            "409": { content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
+          },
+        },
+      },
+      "/v1/pr-groups/{id}": {
+        get: {
+          operationId: "getPrGroupState",
+          summary: "Get the authoritative current state of a PR group",
+          parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+          responses: {
+            "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/PrGroupStateResponse" } } } },
+            "404": { content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
+          },
+        },
+      },
+      "/v1/pr-groups/{id}/events": {
+        get: {
+          operationId: "getPrGroupEvents",
+          summary: "Get a bounded page of authoritative PR group events",
+          parameters: [
+            { name: "id", in: "path", required: true, schema: { type: "string" } },
+            { name: "after_sequence", in: "query", schema: { type: "integer", minimum: 0 } },
+            { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 500 } },
+          ],
+          responses: {
+            "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/PrGroupEventHistoryResponse" } } } },
+            "404": { content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
+          },
+        },
+        post: {
+          operationId: "appendPrGroupEvent",
+          summary: "Append a fenced lifecycle event or receipt",
+          parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+          requestBody: {
+            required: true,
+            content: { "application/json": { schema: { $ref: "#/components/schemas/AppendPrGroupEventInput" } } },
+          },
+          responses: {
+            "201": { content: { "application/json": { schema: { $ref: "#/components/schemas/PrGroupMutationResult" } } } },
+            "409": { content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
+          },
+        },
+      },
+      "/v1/pr-groups/{id}/recover": {
+        post: {
+          operationId: "recoverPrGroup",
+          summary: "Fence the prior attempt and create or adopt a recovery generation",
+          parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+          requestBody: {
+            required: true,
+            content: { "application/json": { schema: { $ref: "#/components/schemas/RecoverPrGroupInput" } } },
+          },
+          responses: {
+            "201": { content: { "application/json": { schema: { $ref: "#/components/schemas/PrGroupMutationResult" } } } },
+            "409": { content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
+          },
         },
       },
       "/v1/stats": {

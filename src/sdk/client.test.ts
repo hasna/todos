@@ -99,6 +99,60 @@ describe("TodosClient local API config", () => {
     expect(result).toBeNull();
   });
 
+  test("exposes typed local PR-group state and bounded history resources", async () => {
+    const paths: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const path = new URL(String(input)).pathname;
+      paths.push(path);
+      if (path.endsWith("/events")) {
+        return Response.json({
+          history: {
+            schema_version: 1,
+            authoritative: true,
+            authority: "local",
+            group_id: "prg_test",
+            events: [],
+            count: 0,
+            has_more: false,
+            next_sequence: null,
+          },
+        });
+      }
+      return Response.json({
+        view: {
+          schema_version: 1,
+          authoritative: true,
+          authority: "local",
+          group: { id: "prg_test" },
+          attempts: [],
+          latest_event: null,
+          review_receipts: [],
+          conditional_merge_receipts: [],
+          cleanup_eligible: false,
+          adapters: {
+            work_runs: [],
+            evidence_refs: [],
+            proof_bundle: {},
+            decision_envelope: {},
+          },
+          diagnostics: {
+            event_count: 0,
+            attempts_omitted: false,
+            receipt_history_complete: true,
+            projection_limits: {},
+          },
+        },
+      });
+    }) as typeof fetch;
+    const client = new TodosClient({ baseUrl: "http://localhost:19427" });
+    expect((await client.prGroups.get("prg_test")).group.id).toBe("prg_test");
+    expect((await client.prGroups.events("prg_test", { limit: 25 })).events).toEqual([]);
+    expect(paths).toEqual([
+      "/api/pr-groups/prg_test",
+      "/api/pr-groups/prg_test/events",
+    ]);
+  });
+
   // M9: subscribe() must send auth headers (x-api-key), not a bare fetch.
   test("subscribe() sends the api key header", async () => {
     let observedHeaders: Record<string, string> = {};

@@ -50,6 +50,22 @@ export interface CreateTemplateInput { "name": string; "title_pattern": string; 
 
 export interface UpdateTemplateInput { "name"?: string; "title_pattern"?: string; "description"?: string | null; "priority"?: "low" | "medium" | "high" | "critical"; "tags"?: Array<string>; "variables"?: Array<Record<string, unknown>>; "project_id"?: string | null; "plan_id"?: string | null; "metadata"?: Record<string, unknown> }
 
+export interface PrGroupStateView { "schema_version": number; "authoritative": boolean; "authority": "local" | "remote"; "group": Record<string, unknown>; "attempts": Array<Record<string, unknown>>; "latest_event": Record<string, unknown> | null; "review_receipts": Array<Record<string, unknown>>; "conditional_merge_receipts": Array<Record<string, unknown>>; "cleanup_eligible": boolean; "adapters": { "work_runs": Array<Record<string, unknown>>; "evidence_refs": Array<Record<string, unknown>>; "proof_bundle": Record<string, unknown>; "decision_envelope": Record<string, unknown> }; "diagnostics": { "event_count": number; "attempts_omitted": boolean; "receipt_history_complete": boolean; "projection_limits": Record<string, unknown> } }
+
+export interface PrGroupStateResponse { "view": PrGroupStateView }
+
+export interface PrGroupEventPage { "schema_version": number; "authoritative": boolean; "authority": "local" | "remote"; "group_id": string; "events": Array<Record<string, unknown>>; "count": number; "has_more": boolean; "next_sequence": number | null }
+
+export interface PrGroupEventHistoryResponse { "history": PrGroupEventPage }
+
+export interface AdmitPrGroupInput { "root_request_id": string; "repository": string; "leaf_task_id": string; "dispatch_attempt": string; "writer_generation": string; "worktree": string; "branch": string; "provider"?: string | null; "provider_run_id"?: string | null; "profile_alias"?: string | null; "admitted_at"?: string }
+
+export interface RecoverPrGroupInput { "leaf_task_id": string; "dispatch_attempt": string; "expected_generation": string; "writer_generation": string; "worktree": string; "branch": string; "provider"?: string | null; "provider_run_id"?: string | null; "profile_alias"?: string | null; "idempotency_key": string; "message"?: string | null; "metadata"?: Record<string, unknown>; "recovered_at"?: string }
+
+export interface AppendPrGroupEventInput { "attempt_id": string; "writer_generation": string; "idempotency_key": string; "event_type": "started" | "progress" | "heartbeat" | "handoff" | "review_requested" | "review_receipt" | "repair_accepted" | "repair_rejected" | "conditional_merge_receipt" | "merge_outcome" | "cancellation" | "failure" | "cleanup_eligible" | "terminal_outcome"; "message"?: string | null; "head_sha"?: string | null; "receipt_key"?: string | null; "outcome"?: "approved" | "changes_requested" | "accepted" | "rejected" | "merged" | "not_merged" | "cancelled" | "failed"; "metadata"?: Record<string, unknown>; "created_at"?: string }
+
+export interface PrGroupMutationResult { "created": boolean; "adopted": boolean; "appended": boolean; "view": PrGroupStateView; "event": Record<string, unknown> }
+
 export interface TodosV1ClientOptions {
   /** Base URL, e.g. process.env.APP_API_URL. */
   baseUrl: string;
@@ -153,6 +169,51 @@ export class TodosV1Client {
     /** Update a plan */
     async updatePlan(id: string, body: UpdatePlanInput, init?: RequestInit): Promise<{ "plan"?: Plan }> {
       return this.request("PATCH", `/v1/plans/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Create or idempotently adopt a deterministic PR group attempt */
+    async admitPrGroup(body: AdmitPrGroupInput, init?: RequestInit): Promise<PrGroupMutationResult> {
+      return this.request("POST", `/v1/pr-groups/admit`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Get the authoritative current state of a PR group */
+    async getPrGroupState(id: string, init?: RequestInit): Promise<PrGroupStateResponse> {
+      return this.request("GET", `/v1/pr-groups/${encodeURIComponent(String(id))}`, {
+        body: undefined,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Get a bounded page of authoritative PR group events */
+    async getPrGroupEvents(id: string, query?: { "after_sequence"?: number; "limit"?: number }, init?: RequestInit): Promise<PrGroupEventHistoryResponse> {
+      return this.request("GET", `/v1/pr-groups/${encodeURIComponent(String(id))}/events`, {
+        body: undefined,
+        query,
+        init,
+      });
+    }
+
+    /** Append a fenced lifecycle event or receipt */
+    async appendPrGroupEvent(id: string, body: AppendPrGroupEventInput, init?: RequestInit): Promise<PrGroupMutationResult> {
+      return this.request("POST", `/v1/pr-groups/${encodeURIComponent(String(id))}/events`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Fence the prior attempt and create or adopt a recovery generation */
+    async recoverPrGroup(id: string, body: RecoverPrGroupInput, init?: RequestInit): Promise<PrGroupMutationResult> {
+      return this.request("POST", `/v1/pr-groups/${encodeURIComponent(String(id))}/recover`, {
         body,
         query: undefined,
         init,

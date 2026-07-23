@@ -4,6 +4,7 @@ import { getDatabase, resetDatabase } from "../db/database.js";
 import { createLocalSqliteTodosStorageAdapter } from "../storage/local-sqlite.js";
 import type { TodosStorageAdapter } from "../storage/interfaces.js";
 import { handleV1Request, type V1RequestDependencies } from "./v1.js";
+import { createLocalPrGroupLedger } from "../pr-groups/index.js";
 
 let db: Database;
 let store: TodosStorageAdapter;
@@ -27,6 +28,7 @@ beforeEach(() => {
   dependencies = {
     ensureSchema: async () => {},
     getStorageAdapter: () => store,
+    getPrGroupLedger: () => createLocalPrGroupLedger(db),
     getVerifier: () => ({
       authenticate: async () => ({ ok: true, principal }),
     }) as ReturnType<NonNullable<V1RequestDependencies["getVerifier"]>>,
@@ -36,6 +38,39 @@ beforeEach(() => {
 afterEach(() => resetDatabase());
 
 describe("/v1 task-list cloud parity", () => {
+  test("routes authenticated PR-group state and history through the injected authority", async () => {
+    const admitted = await request("/v1/pr-groups/admit", "POST", {
+      root_request_id: "request-root",
+      repository: "hasna/todos",
+      leaf_task_id: "leaf-task",
+      dispatch_attempt: "dispatch-1",
+      writer_generation: "generation-1",
+      worktree: "/tmp/pr-group",
+      branch: "feat/pr-group",
+      admitted_at: "2026-07-23T10:00:00.000Z",
+    });
+    expect(admitted?.status).toBe(201);
+    const admission = await admitted!.json() as {
+      view: { group: { id: string }; attempts: Array<{ id: string }> };
+    };
+    const progress = await request(
+      `/v1/pr-groups/${admission.view.group.id}/events`,
+      "POST",
+      {
+        attempt_id: admission.view.attempts[0]!.id,
+        writer_generation: "generation-1",
+        idempotency_key: "progress-1",
+        event_type: "progress",
+      },
+    );
+    expect(progress?.status).toBe(201);
+    expect(await (await request(`/v1/pr-groups/${admission.view.group.id}`))!.json()).toMatchObject({
+      view: { authoritative: true, group: { state: "in_progress" } },
+    });
+    expect(await (await request(`/v1/pr-groups/${admission.view.group.id}/events?limit=1`))!.json())
+      .toMatchObject({ history: { count: 1, has_more: true } });
+  });
+
   test("list tasks returns total and honors every documented filter plus offset", async () => {
     const project = await store.projects.create({ name: "Filtered", path: "/tmp/filtered" });
     const list = await store.taskLists.create({ name: "Queue", slug: "queue", project_id: project.id });

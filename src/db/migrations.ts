@@ -1227,4 +1227,83 @@ export const MIGRATIONS = [
   CREATE INDEX IF NOT EXISTS idx_plans_slug ON plans(slug);
   INSERT OR IGNORE INTO _migrations (id) VALUES (64);
   `,
+  // Migration 65: Authoritative PR-group execution ledger and fenced writer generations
+  `
+  CREATE TABLE IF NOT EXISTS pr_groups (
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    id TEXT PRIMARY KEY,
+    identity_key TEXT NOT NULL UNIQUE,
+    root_request_id TEXT NOT NULL,
+    repository TEXT NOT NULL,
+    state TEXT NOT NULL,
+    active_attempt_id TEXT,
+    active_generation TEXT,
+    terminal_attempt_id TEXT,
+    terminal_generation TEXT,
+    terminal_outcome TEXT,
+    terminal_head_sha TEXT,
+    terminal_at TEXT,
+    cleanup_eligible_at TEXT,
+    revision INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_pr_groups_identity ON pr_groups(identity_key);
+  CREATE INDEX IF NOT EXISTS idx_pr_groups_root_repository ON pr_groups(root_request_id, repository);
+  CREATE INDEX IF NOT EXISTS idx_pr_groups_active_generation ON pr_groups(active_generation);
+
+  CREATE TABLE IF NOT EXISTS pr_group_attempts (
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    id TEXT PRIMARY KEY,
+    group_id TEXT NOT NULL REFERENCES pr_groups(id) ON DELETE CASCADE,
+    leaf_task_id TEXT NOT NULL,
+    dispatch_attempt TEXT NOT NULL,
+    writer_generation TEXT NOT NULL,
+    previous_attempt_id TEXT REFERENCES pr_group_attempts(id) ON DELETE SET NULL,
+    worktree TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    provider TEXT,
+    provider_run_id TEXT,
+    profile_alias TEXT,
+    status TEXT NOT NULL,
+    admitted_at TEXT NOT NULL,
+    started_at TEXT,
+    last_heartbeat_at TEXT,
+    handed_off_at TEXT,
+    fenced_at TEXT,
+    terminal_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(group_id, leaf_task_id, dispatch_attempt),
+    UNIQUE(group_id, writer_generation)
+  );
+  CREATE INDEX IF NOT EXISTS idx_pr_group_attempts_group ON pr_group_attempts(group_id, created_at, id);
+  CREATE INDEX IF NOT EXISTS idx_pr_group_attempts_generation ON pr_group_attempts(group_id, writer_generation);
+
+  CREATE TABLE IF NOT EXISTS pr_group_events (
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    id TEXT PRIMARY KEY,
+    group_id TEXT NOT NULL REFERENCES pr_groups(id) ON DELETE CASCADE,
+    attempt_id TEXT NOT NULL REFERENCES pr_group_attempts(id) ON DELETE CASCADE,
+    writer_generation TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    state TEXT NOT NULL,
+    message TEXT,
+    head_sha TEXT,
+    receipt_key TEXT,
+    outcome TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    payload_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(group_id, sequence),
+    UNIQUE(group_id, idempotency_key),
+    UNIQUE(group_id, receipt_key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_pr_group_events_group_sequence ON pr_group_events(group_id, sequence);
+  CREATE INDEX IF NOT EXISTS idx_pr_group_events_attempt ON pr_group_events(attempt_id, sequence);
+  CREATE INDEX IF NOT EXISTS idx_pr_group_events_receipt ON pr_group_events(group_id, receipt_key);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (65);
+  `,
 ];

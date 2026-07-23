@@ -1318,6 +1318,87 @@ export function ensureSchema(db: Database): void {
     )`);
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys(prefix)");
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_api_keys_active ON api_keys(revoked_at, expires_at)");
+
+  // Authoritative PR-group execution ledger. Identity and receipt indexes are
+  // durable fences, not advisory cache keys.
+  ensureTable("pr_groups", `
+    CREATE TABLE pr_groups (
+      schema_version INTEGER NOT NULL DEFAULT 1,
+      id TEXT PRIMARY KEY,
+      identity_key TEXT NOT NULL UNIQUE,
+      root_request_id TEXT NOT NULL,
+      repository TEXT NOT NULL,
+      state TEXT NOT NULL,
+      active_attempt_id TEXT,
+      active_generation TEXT,
+      terminal_attempt_id TEXT,
+      terminal_generation TEXT,
+      terminal_outcome TEXT,
+      terminal_head_sha TEXT,
+      terminal_at TEXT,
+      cleanup_eligible_at TEXT,
+      revision INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )`);
+  ensureIndex("CREATE UNIQUE INDEX IF NOT EXISTS idx_pr_groups_identity ON pr_groups(identity_key)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_pr_groups_root_repository ON pr_groups(root_request_id, repository)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_pr_groups_active_generation ON pr_groups(active_generation)");
+
+  ensureTable("pr_group_attempts", `
+    CREATE TABLE pr_group_attempts (
+      schema_version INTEGER NOT NULL DEFAULT 1,
+      id TEXT PRIMARY KEY,
+      group_id TEXT NOT NULL REFERENCES pr_groups(id) ON DELETE CASCADE,
+      leaf_task_id TEXT NOT NULL,
+      dispatch_attempt TEXT NOT NULL,
+      writer_generation TEXT NOT NULL,
+      previous_attempt_id TEXT REFERENCES pr_group_attempts(id) ON DELETE SET NULL,
+      worktree TEXT NOT NULL,
+      branch TEXT NOT NULL,
+      provider TEXT,
+      provider_run_id TEXT,
+      profile_alias TEXT,
+      status TEXT NOT NULL,
+      admitted_at TEXT NOT NULL,
+      started_at TEXT,
+      last_heartbeat_at TEXT,
+      handed_off_at TEXT,
+      fenced_at TEXT,
+      terminal_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(group_id, leaf_task_id, dispatch_attempt),
+      UNIQUE(group_id, writer_generation)
+    )`);
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_pr_group_attempts_group ON pr_group_attempts(group_id, created_at, id)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_pr_group_attempts_generation ON pr_group_attempts(group_id, writer_generation)");
+
+  ensureTable("pr_group_events", `
+    CREATE TABLE pr_group_events (
+      schema_version INTEGER NOT NULL DEFAULT 1,
+      id TEXT PRIMARY KEY,
+      group_id TEXT NOT NULL REFERENCES pr_groups(id) ON DELETE CASCADE,
+      attempt_id TEXT NOT NULL REFERENCES pr_group_attempts(id) ON DELETE CASCADE,
+      writer_generation TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      state TEXT NOT NULL,
+      message TEXT,
+      head_sha TEXT,
+      receipt_key TEXT,
+      outcome TEXT,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      payload_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(group_id, sequence),
+      UNIQUE(group_id, idempotency_key),
+      UNIQUE(group_id, receipt_key)
+    )`);
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_pr_group_events_group_sequence ON pr_group_events(group_id, sequence)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_pr_group_events_attempt ON pr_group_events(attempt_id, sequence)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_pr_group_events_receipt ON pr_group_events(group_id, receipt_key)");
 }
 
 export function backfillTaskTags(db: Database): void {

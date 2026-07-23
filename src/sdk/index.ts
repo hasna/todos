@@ -25,6 +25,24 @@ export type {
   CreateTaskCommentInput as TodosV1CreateTaskCommentInput,
 } from "./v1.generated.js";
 
+export type {
+  AdmitPrGroupInput,
+  AppendPrGroupEventInput,
+  PrGroupAdapterViews,
+  PrGroupAttemptRecord,
+  PrGroupDecisionEnvelopeAdapter,
+  PrGroupEventListOptions,
+  PrGroupEventPage,
+  PrGroupEventRecord,
+  PrGroupEvidenceRefAdapter,
+  PrGroupMutationResult,
+  PrGroupProofBundleAdapter,
+  PrGroupRecord,
+  PrGroupStateView,
+  PrGroupWorkRunAdapter,
+  RecoverPrGroupInput,
+} from "../pr-groups/types.js";
+
 export {
   TodosAPIError,
   TodosNotFoundError,

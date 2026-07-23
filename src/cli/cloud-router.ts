@@ -12,6 +12,7 @@ import { resolve as resolvePath } from "node:path";
 import type { Agent, CreatePlanInput, CreateTaskListInput, CreateTemplateInput, Plan, Project, RegisterAgentInput, Task, TaskComment, TaskDependency, TaskFilter, TaskHistory, TaskList, TaskTemplate, TemplateWithTasks, UpdatePlanInput, UpdateTaskListInput } from "../types/index.js";
 import type { UpdateTemplateInput } from "../storage/interfaces.js";
 import { redactEvidenceText } from "../lib/redaction.js";
+import type { PrGroupEventListOptions, PrGroupEventPage, PrGroupStateView } from "../pr-groups/types.js";
 
 type Env = Record<string, string | undefined>;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -364,6 +365,67 @@ export function isCloudRouting(env: Env = process.env as Env): boolean {
 export function resetTodosCloudClient(): void {
   // Only protocol capabilities are cached, keyed by authority rather than credentials.
   completionCapabilityCache.clear();
+}
+
+function assertRemotePrGroupView(value: unknown, route: string): PrGroupStateView {
+  if (!value || typeof value !== "object" ||
+      (value as { authoritative?: unknown }).authoritative !== true ||
+      (value as { authority?: unknown }).authority !== "remote" ||
+      !Array.isArray((value as { attempts?: unknown }).attempts) ||
+      !Array.isArray((value as { review_receipts?: unknown }).review_receipts) ||
+      !Array.isArray((value as { conditional_merge_receipts?: unknown }).conditional_merge_receipts)) {
+    throw new Error(
+      `REMOTE_PR_GROUP_INVALID_RESPONSE: ${route} did not return a complete authoritative remote projection; ` +
+        "local SQLite fallback is disabled",
+    );
+  }
+  return value as PrGroupStateView;
+}
+
+/** Read an authoritative remote PR-group projection without local fallback. */
+export async function cloudGetPrGroup(client: HasnaStorageClient, groupId: string): Promise<PrGroupStateView> {
+  const route = `/v1/pr-groups/${encodeURIComponent(groupId)}`;
+  const raw = await requiredRemoteRoute(client, route, () =>
+    client.transport.get<unknown>(`/pr-groups/${encodeURIComponent(groupId)}`));
+  const view = raw && typeof raw === "object" ? (raw as { view?: unknown }).view : undefined;
+  const authoritative = assertRemotePrGroupView(view, route);
+  if (authoritative.group?.id !== groupId) {
+    throw new Error(
+      `REMOTE_PR_GROUP_INVALID_RESPONSE: ${route} returned a different PR-group identity; ` +
+        "local SQLite fallback is disabled",
+    );
+  }
+  return authoritative;
+}
+
+/** Read a bounded authoritative remote PR-group event page without local fallback. */
+export async function cloudPrGroupEvents(
+  client: HasnaStorageClient,
+  groupId: string,
+  options: PrGroupEventListOptions = {},
+): Promise<PrGroupEventPage> {
+  const route = `/v1/pr-groups/${encodeURIComponent(groupId)}/events`;
+  const raw = await requiredRemoteRoute(client, route, () =>
+    client.transport.get<unknown>(`/pr-groups/${encodeURIComponent(groupId)}/events`, {
+      query: {
+        ...(options.limit !== undefined ? { limit: options.limit } : {}),
+        ...(options.after_sequence !== undefined ? { after_sequence: options.after_sequence } : {}),
+      },
+    }));
+  const history = raw && typeof raw === "object" ? (raw as { history?: unknown }).history : undefined;
+  if (!history || typeof history !== "object" ||
+      (history as { authoritative?: unknown }).authoritative !== true ||
+      (history as { authority?: unknown }).authority !== "remote" ||
+      (history as { group_id?: unknown }).group_id !== groupId ||
+      !Array.isArray((history as { events?: unknown }).events) ||
+      typeof (history as { count?: unknown }).count !== "number" ||
+      (history as { events: unknown[] }).events.length !== (history as { count: number }).count) {
+    throw new Error(
+      `REMOTE_PR_GROUP_INVALID_RESPONSE: ${route} did not return a complete authoritative remote event page; ` +
+        "local SQLite fallback is disabled",
+    );
+  }
+  return history as PrGroupEventPage;
 }
 
 /** Unwrap the `{ task }` envelope the todos `/v1` API returns for single tasks. */
