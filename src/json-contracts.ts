@@ -112,6 +112,23 @@ const tagsField = field("array", "Array of string tags.");
 
 export const TODOS_AUTHORITATIVE_JSON_PROJECTIONS: TodosJsonObjectContract[] = [
   closedContract({
+    id: "pr_group_ci_proof",
+    name: "Authoritative PR Group CI Proof",
+    description: "Closed successful provider-CI evidence bound to one repository, PR, base, and exact head before conditional merge authorization.",
+    surfaces: ["api", "sdk"],
+    stability: "stable",
+    required: {
+      provider: field("string", "Authoritative CI provider identity."),
+      provider_run_id: field("string", "Provider-owned CI run or check-suite identity."),
+      status: field("string", "Terminal successful CI status."),
+      repository: field("string", "Canonical repository identity."),
+      pr_number: field("integer", "Concrete pull-request number."),
+      base_sha: field("string", "Exact base commit SHA."),
+      head_sha: field("string", "Exact reviewed and merge-authorized head commit SHA."),
+    },
+    optional: {},
+  }),
+  closedContract({
     id: "pr_group_state_view",
     name: "Authoritative PR Group State View",
     description: "Closed package-owned projection for immutable task-to-PR lineage, repair accounting, append-only receipts, adapters, and diagnostics.",

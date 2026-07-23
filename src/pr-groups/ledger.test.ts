@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { runMigrations } from "../db/schema.js";
 import {
   PrGroupLedger,
@@ -29,6 +30,23 @@ const RECEIPT_BINDING = {
   actor_id: "reviewer-1",
   actor_run_id: "review-run-1",
 } as const;
+const MERGE_OPERATOR = {
+  actor_id: "merge-operator-1",
+  actor_run_id: "merge-run-1",
+} as const;
+
+function ciProof(overrides: Record<string, unknown> = {}) {
+  return {
+    provider: "github",
+    provider_run_id: "ci-run-1",
+    status: "success",
+    repository: "hasna/todos",
+    pr_number: PR_NUMBER,
+    base_sha: BASE_A,
+    head_sha: HEAD_A,
+    ...overrides,
+  };
+}
 
 function admission(overrides: Partial<AdmitPrGroupInput> = {}): AdmitPrGroupInput {
   return {
@@ -143,6 +161,165 @@ describe("authoritative PR-group ledger", () => {
     }))).rejects.toMatchObject({ code: "PR_GROUP_WRITER_FENCED" });
   });
 
+  test("fresh admissions require concrete PR and base identity", async () => {
+    await expect(ledger.admit(admission({
+      root_request_id: "provisional-pr-identity",
+      pr_number: null,
+      base_sha: null,
+    }))).rejects.toMatchObject({ code: "PR_GROUP_IDENTITY_CONFLICT" });
+  });
+
+  test("active writers cannot be recovered before the stale-writer lease expires", async () => {
+    const admitted = await ledger.admit(admission({ root_request_id: "active-recovery-fence" }));
+    await expect(ledger.recover({
+      group_id: admitted.view.group.id,
+      root_request_id: "active-recovery-fence",
+      repository: "hasna/todos",
+      leaf_task_id: "leaf-task-1",
+      expected_attempt_id: admitted.view.attempts[0]!.id,
+      dispatch_attempt: "dispatch-too-early",
+      expected_generation: "generation-1",
+      writer_generation: "generation-2",
+      worktree: "/tmp/recovery-too-early",
+      branch: "feat/pr-group-ledger",
+      pr_number: PR_NUMBER,
+      base_sha: BASE_A,
+      provider: "codewith",
+      provider_run_id: "provider-run-2",
+      profile_alias: "account012",
+      idempotency_key: "recovery-too-early",
+      recovered_at: T0,
+    })).rejects.toMatchObject({ code: "PR_GROUP_WRITER_ACTIVE" } as any);
+  });
+
+  test("conditional merge requires exact provider CI proof and an operator distinct from review", async () => {
+    const prepareReviewed = async (root: string) => {
+      const admitted = await ledger.admit(admission({ root_request_id: root }));
+      const groupId = admitted.view.group.id;
+      const attemptId = admitted.view.attempts[0]!.id;
+      const append = (event: Record<string, unknown>) => ledger.append({
+        group_id: groupId,
+        attempt_id: attemptId,
+        writer_generation: "generation-1",
+        created_at: T0,
+        ...event,
+      } as AppendPrGroupEventInput);
+      await append({ idempotency_key: `${root}-start`, event_type: "started" });
+      await append({ idempotency_key: `${root}-handoff`, event_type: "handoff" });
+      await append({
+        idempotency_key: `${root}-request`,
+        event_type: "review_requested",
+        head_sha: HEAD_A,
+        ...RECEIPT_BINDING,
+        expected_reviewer_id: "reviewer-1",
+        expected_reviewer_run_id: "review-run-1",
+      });
+      await append({
+        idempotency_key: `${root}-review`,
+        event_type: "review_receipt",
+        head_sha: HEAD_A,
+        receipt_key: `${root}-review-receipt`,
+        outcome: "approved",
+        ...RECEIPT_BINDING,
+      });
+      return { append, reviewReceipt: `${root}-review-receipt` };
+    };
+
+    const sameOperator = await prepareReviewed("same-review-merge-operator");
+    await expect(sameOperator.append({
+      idempotency_key: "same-operator-conditional",
+      event_type: "conditional_merge_receipt",
+      head_sha: HEAD_A,
+      receipt_key: "same-operator-conditional",
+      review_receipt_key: sameOperator.reviewReceipt,
+      ...RECEIPT_BINDING,
+      ci_proof: ciProof(),
+    })).rejects.toMatchObject({ code: "PR_GROUP_OPERATOR_SEPARATION_REQUIRED" } as any);
+
+    const exactCi = await prepareReviewed("exact-ci-proof");
+    await expect(exactCi.append({
+      idempotency_key: "shared-run-conditional",
+      event_type: "conditional_merge_receipt",
+      head_sha: HEAD_A,
+      receipt_key: "shared-run-conditional",
+      review_receipt_key: exactCi.reviewReceipt,
+      ...RECEIPT_BINDING,
+      actor_id: MERGE_OPERATOR.actor_id,
+      actor_run_id: RECEIPT_BINDING.actor_run_id,
+      ci_proof: ciProof(),
+    })).rejects.toMatchObject({ code: "PR_GROUP_OPERATOR_SEPARATION_REQUIRED" } as any);
+
+    await expect(exactCi.append({
+      idempotency_key: "mismatched-ci-conditional",
+      event_type: "conditional_merge_receipt",
+      head_sha: HEAD_A,
+      receipt_key: "mismatched-ci-conditional",
+      review_receipt_key: exactCi.reviewReceipt,
+      ...RECEIPT_BINDING,
+      ...MERGE_OPERATOR,
+      ci_proof: ciProof({ head_sha: HEAD_B }),
+    })).rejects.toMatchObject({ code: "PR_GROUP_EXACT_HEAD_REQUIRED" });
+
+    await exactCi.append({
+      idempotency_key: "exact-ci-conditional",
+      event_type: "conditional_merge_receipt",
+      head_sha: HEAD_A,
+      receipt_key: "exact-ci-conditional",
+      review_receipt_key: exactCi.reviewReceipt,
+      ...RECEIPT_BINDING,
+      ...MERGE_OPERATOR,
+      ci_proof: ciProof(),
+    });
+    await expect(exactCi.append({
+      idempotency_key: "wrong-merge-operator",
+      event_type: "merge_outcome",
+      head_sha: HEAD_A,
+      receipt_key: "wrong-merge-operator",
+      conditional_merge_receipt_key: "exact-ci-conditional",
+      outcome: "merged",
+      ...RECEIPT_BINDING,
+    })).rejects.toMatchObject({ code: "PR_GROUP_OPERATOR_SEPARATION_REQUIRED" } as any);
+  });
+
+  test("receipt keys are globally unique across PR groups", async () => {
+    const appendReview = async (root: string, receiptKey: string) => {
+      const admitted = await ledger.admit(admission({ root_request_id: root }));
+      const groupId = admitted.view.group.id;
+      const attemptId = admitted.view.attempts[0]!.id;
+      const append = (event: Record<string, unknown>) => ledger.append({
+        group_id: groupId,
+        attempt_id: attemptId,
+        writer_generation: "generation-1",
+        created_at: T0,
+        ...event,
+      } as AppendPrGroupEventInput);
+      await append({ idempotency_key: `${root}-start`, event_type: "started" });
+      await append({ idempotency_key: `${root}-handoff`, event_type: "handoff" });
+      await append({
+        idempotency_key: `${root}-request`,
+        event_type: "review_requested",
+        head_sha: HEAD_A,
+        ...RECEIPT_BINDING,
+        expected_reviewer_id: "reviewer-1",
+        expected_reviewer_run_id: "review-run-1",
+      });
+      return append({
+        idempotency_key: `${root}-review`,
+        event_type: "review_receipt",
+        head_sha: HEAD_A,
+        receipt_key: receiptKey,
+        outcome: "approved",
+        ...RECEIPT_BINDING,
+      });
+    };
+
+    await appendReview("global-receipt-a", "globally-unique-review-receipt");
+    await expect(appendReview(
+      "global-receipt-b",
+      "globally-unique-review-receipt",
+    )).rejects.toMatchObject({ code: "PR_GROUP_RECEIPT_REPLAY" });
+  });
+
   test("serializes split-brain admission across persistence instances sharing one SQLite authority", async () => {
     const alternate = new PrGroupLedger(new SqlitePrGroupLedgerPersistence(db));
     const results = await Promise.all([
@@ -208,6 +385,8 @@ describe("authoritative PR-group ledger", () => {
       receipt_key: "conditional-wrong",
       review_receipt_key: "review-receipt-1",
       ...RECEIPT_BINDING,
+      ...MERGE_OPERATOR,
+      ci_proof: ciProof({ head_sha: HEAD_B }),
     })).rejects.toMatchObject({ code: "PR_GROUP_REVIEW_REQUIRED" });
 
     await append({
@@ -217,6 +396,8 @@ describe("authoritative PR-group ledger", () => {
       receipt_key: "conditional-receipt-1",
       review_receipt_key: "review-receipt-1",
       ...RECEIPT_BINDING,
+      ...MERGE_OPERATOR,
+      ci_proof: ciProof(),
     });
     await expect(append({
       idempotency_key: "receipt-replay",
@@ -225,6 +406,8 @@ describe("authoritative PR-group ledger", () => {
       receipt_key: "conditional-receipt-1",
       review_receipt_key: "review-receipt-1",
       ...RECEIPT_BINDING,
+      ...MERGE_OPERATOR,
+      ci_proof: ciProof(),
     })).rejects.toMatchObject({ code: "PR_GROUP_RECEIPT_REPLAY" });
 
     const merged = await append({
@@ -235,6 +418,7 @@ describe("authoritative PR-group ledger", () => {
       conditional_merge_receipt_key: "conditional-receipt-1",
       outcome: "merged",
       ...RECEIPT_BINDING,
+      ...MERGE_OPERATOR,
     });
     expect(merged.view.group).toMatchObject({
       state: "merged",
@@ -450,6 +634,20 @@ describe("authoritative PR-group ledger", () => {
         profile_alias: "account012",
         idempotency_key: `recover-${eventType}`,
       })).rejects.toMatchObject({ code: "PR_GROUP_TERMINAL" });
+      await expect(isolated.append({
+        group_id: admitted.view.group.id,
+        attempt_id: admitted.view.attempts[0]!.id,
+        writer_generation: "generation-1",
+        idempotency_key: `cleanup-${eventType}`,
+        event_type: "cleanup_eligible",
+        cleanup_proof: cleanupProof({
+          terminal_disposition: outcome,
+          review_receipt_key: null,
+          conditional_merge_receipt_key: null,
+          merge_receipt_key: null,
+        }),
+        created_at: T0,
+      })).rejects.toMatchObject({ code: "PR_GROUP_CLEANUP_BLOCKED" });
       isolatedDb.close();
     }
   });
@@ -572,7 +770,101 @@ describe("authoritative PR-group ledger", () => {
       receipt_key: "conditional-after-revocation",
       review_receipt_key: "approval-1",
       ...RECEIPT_BINDING,
+      ...MERGE_OPERATOR,
+      ci_proof: ciProof(),
     })).rejects.toMatchObject({ code: "PR_GROUP_REVIEW_REQUIRED" });
+  });
+
+  test("a newer review request globally revokes obsolete-head review authority", async () => {
+    const admitted = await ledger.admit(admission({ root_request_id: "global-review-revocation" }));
+    const groupId = admitted.view.group.id;
+    const attemptId = admitted.view.attempts[0]!.id;
+    const append = (event: Record<string, unknown>) => ledger.append({
+      group_id: groupId,
+      attempt_id: attemptId,
+      writer_generation: "generation-1",
+      created_at: T0,
+      ...event,
+    } as AppendPrGroupEventInput);
+
+    await append({ idempotency_key: "start", event_type: "started" });
+    await append({ idempotency_key: "handoff-a", event_type: "handoff" });
+    await append({
+      idempotency_key: "request-a",
+      event_type: "review_requested",
+      head_sha: HEAD_A,
+      ...RECEIPT_BINDING,
+      expected_reviewer_id: "reviewer-1",
+      expected_reviewer_run_id: "review-run-1",
+    });
+    await append({
+      idempotency_key: "approval-a",
+      event_type: "review_receipt",
+      head_sha: HEAD_A,
+      receipt_key: "approval-a",
+      outcome: "approved",
+      ...RECEIPT_BINDING,
+    });
+    await append({
+      idempotency_key: "changes-a",
+      event_type: "review_receipt",
+      head_sha: HEAD_A,
+      receipt_key: "changes-a",
+      outcome: "changes_requested",
+      ...RECEIPT_BINDING,
+    });
+    await append({
+      idempotency_key: "repair-a",
+      event_type: "repair_accepted",
+      outcome: "accepted",
+      repair_cycle: 1,
+    });
+    await append({ idempotency_key: "handoff-b", event_type: "handoff" });
+    await append({
+      idempotency_key: "request-b",
+      event_type: "review_requested",
+      head_sha: HEAD_B,
+      ...RECEIPT_BINDING,
+      expected_reviewer_id: "reviewer-1",
+      expected_reviewer_run_id: "review-run-1",
+    });
+    await append({
+      idempotency_key: "changes-b",
+      event_type: "review_receipt",
+      head_sha: HEAD_B,
+      receipt_key: "changes-b",
+      outcome: "changes_requested",
+      ...RECEIPT_BINDING,
+    });
+
+    await expect(append({
+      idempotency_key: "late-approval-a",
+      event_type: "review_receipt",
+      head_sha: HEAD_A,
+      receipt_key: "late-approval-a",
+      outcome: "approved",
+      ...RECEIPT_BINDING,
+    })).rejects.toMatchObject({ code: "PR_GROUP_EXACT_HEAD_REQUIRED" });
+
+    await append({
+      idempotency_key: "approval-b",
+      event_type: "review_receipt",
+      head_sha: HEAD_B,
+      receipt_key: "approval-b",
+      outcome: "approved",
+      ...RECEIPT_BINDING,
+    });
+    const mergeReady = await append({
+      idempotency_key: "conditional-b",
+      event_type: "conditional_merge_receipt",
+      head_sha: HEAD_B,
+      receipt_key: "conditional-b",
+      review_receipt_key: "approval-b",
+      ...RECEIPT_BINDING,
+      ...MERGE_OPERATOR,
+      ci_proof: ciProof({ head_sha: HEAD_B }),
+    });
+    expect(mergeReady.view.group.state).toBe("merge_ready");
   });
 
   test("recovery replay binds the complete immutable request envelope before adoption", async () => {
@@ -596,7 +888,7 @@ describe("authoritative PR-group ledger", () => {
       provider_run_id: "provider-run-2",
       profile_alias: "account012",
       idempotency_key: "recovery-complete",
-      recovered_at: T0,
+      recovered_at: "2026-07-23T10:01:00.000Z",
     };
     expect((await ledger.recover(input as any)).appended).toBe(true);
 
@@ -724,6 +1016,27 @@ describe("authoritative PR-group ledger", () => {
       active_generation: null,
     });
     await expect(append({
+      idempotency_key: "cleanup-no-go-unbound",
+      event_type: "cleanup_eligible",
+      cleanup_proof: cleanupProof({
+        terminal_disposition: "no_go",
+        review_receipt_key: null,
+        conditional_merge_receipt_key: null,
+        merge_receipt_key: null,
+      }),
+    })).rejects.toMatchObject({ code: "PR_GROUP_CLEANUP_BLOCKED" });
+    const cleanup = await append({
+      idempotency_key: "cleanup-no-go-exact",
+      event_type: "cleanup_eligible",
+      cleanup_proof: cleanupProof({
+        terminal_disposition: "no_go",
+        review_receipt_key: "review-fail-2",
+        conditional_merge_receipt_key: null,
+        merge_receipt_key: null,
+      }),
+    });
+    expect(cleanup.view.cleanup_eligible).toBe(true);
+    await expect(append({
       idempotency_key: "repair-3",
       event_type: "repair_accepted",
       outcome: "accepted",
@@ -767,6 +1080,8 @@ describe("authoritative PR-group ledger", () => {
       receipt_key: "conditional-receipt-1",
       review_receipt_key: "review-receipt-1",
       ...RECEIPT_BINDING,
+      ...MERGE_OPERATOR,
+      ci_proof: ciProof(),
     });
     await append({
       idempotency_key: "merged",
@@ -776,6 +1091,7 @@ describe("authoritative PR-group ledger", () => {
       conditional_merge_receipt_key: "conditional-receipt-1",
       outcome: "merged",
       ...RECEIPT_BINDING,
+      ...MERGE_OPERATOR,
     });
 
     for (const field of [
@@ -974,6 +1290,31 @@ describe("authoritative PR-group ledger", () => {
     });
   });
 
+  test("an exact admission retry replays after terminal failure while changed identity conflicts", async () => {
+    const input = admission({ root_request_id: "terminal-admission-replay" });
+    const admitted = await ledger.admit(input);
+    await ledger.append({
+      group_id: admitted.view.group.id,
+      attempt_id: admitted.view.attempts[0]!.id,
+      writer_generation: "generation-1",
+      idempotency_key: "terminal-admission-failure",
+      event_type: "failure",
+      outcome: "failed",
+      created_at: "2026-07-23T11:03:00.000Z",
+    });
+
+    const replay = await ledger.admit(input);
+    expect(replay).toMatchObject({
+      adopted: true,
+      appended: false,
+      event: { id: admitted.event.id },
+    });
+    await expect(ledger.admit({
+      ...input,
+      worktree: "/tmp/changed-terminal-admission",
+    })).rejects.toMatchObject({ code: "PR_GROUP_IDENTITY_CONFLICT" });
+  });
+
   test("recovery retries omit recovered_at without changing stable request identity", async () => {
     const recoverable = await ledger.admit(admission({
       root_request_id: "timestamp-recovery",
@@ -1009,9 +1350,69 @@ describe("authoritative PR-group ledger", () => {
     });
   });
 
-  test("migration 66 backfills rejected-head SQLite lineage and PostgreSQL publishes equivalent repairs", () => {
+  test("bounded state projections never expose events for omitted attempts", async () => {
+    let current = await ledger.admit(admission({
+      root_request_id: "bounded-attempt-projection",
+      dispatch_attempt: "projection-dispatch-0",
+      writer_generation: "projection-generation-0",
+    }));
+    for (let index = 1; index <= 101; index += 1) {
+      const previous = current.view.attempts.at(-1)!;
+      current = await ledger.recover({
+        group_id: current.view.group.id,
+        root_request_id: "bounded-attempt-projection",
+        repository: "hasna/todos",
+        leaf_task_id: "leaf-task-1",
+        expected_attempt_id: previous.id,
+        dispatch_attempt: `projection-dispatch-${index}`,
+        expected_generation: previous.writer_generation,
+        writer_generation: `projection-generation-${index}`,
+        worktree: `/tmp/projection-${index}`,
+        branch: "feat/pr-group-ledger",
+        pr_number: PR_NUMBER,
+        base_sha: BASE_A,
+        provider: "codewith",
+        provider_run_id: `projection-provider-${index}`,
+        profile_alias: "account012",
+        idempotency_key: `projection-recovery-${index}`,
+        recovered_at: new Date(Date.parse(T0) + index * 60_000).toISOString(),
+      });
+    }
+
+    const view = await ledger.get(current.view.group.id);
+    const visibleAttempts = new Set(view.attempts.map((attempt) => attempt.id));
+    expect(view.attempts).toHaveLength(100);
+    expect(view.diagnostics).toMatchObject({
+      attempts_omitted: true,
+      receipt_history_complete: false,
+      event_count: view.group.revision,
+    });
+    expect(view.adapters.evidence_refs.every(
+      (evidence) => visibleAttempts.has(evidence.work_run_id),
+    )).toBe(true);
+    expect(view.adapters.proof_bundle.evidence_ref_ids).toEqual(
+      view.adapters.evidence_refs.map((evidence) => evidence.id),
+    );
+  });
+
+  test("migration 66 backfills and safely reopens rejected-head SQLite identity", async () => {
     const upgradeDb = new Database(":memory:");
     runMigrations(upgradeDb);
+    const legacyRoot = "legacy-root";
+    const legacyRepository = "hasna/todos";
+    const legacyLeaf = "legacy-leaf";
+    const legacyBranch = "feat/legacy";
+    const legacyDispatch = "legacy-dispatch";
+    const legacyGeneration = "legacy-generation";
+    const legacyIdentity = createHash("sha256")
+      .update(`pr-group:v1\0${legacyRoot}\0${legacyRepository}`)
+      .digest("hex");
+    const legacyGroupId = `prg_${legacyIdentity.slice(0, 32)}`;
+    const legacyAttemptId = deterministicPrGroupAttemptId(
+      legacyGroupId,
+      legacyLeaf,
+      legacyDispatch,
+    );
     upgradeDb.exec(`
       PRAGMA foreign_keys = ON;
       DROP TABLE pr_group_events;
@@ -1082,50 +1483,127 @@ describe("authoritative PR-group ledger", () => {
         id, identity_key, root_request_id, repository, state,
         active_attempt_id, active_generation, created_at, updated_at
       ) VALUES (
-        'legacy-group', 'legacy-identity', 'legacy-root', 'hasna/todos', 'admitted',
-        'legacy-attempt', 'legacy-generation', '${T0}', '${T0}'
+        '${legacyGroupId}', '${legacyIdentity}', '${legacyRoot}', '${legacyRepository}', 'admitted',
+        '${legacyAttemptId}', '${legacyGeneration}', '${T0}', '${T0}'
       );
       INSERT INTO pr_group_attempts (
         id, group_id, leaf_task_id, dispatch_attempt, writer_generation,
         worktree, branch, provider, status, admitted_at, created_at, updated_at
       ) VALUES (
-        'legacy-attempt', 'legacy-group', 'legacy-leaf', 'legacy-dispatch', 'legacy-generation',
-        '/tmp/legacy', 'feat/legacy', 'codewith', 'admitted', '${T0}', '${T0}', '${T0}'
+        '${legacyAttemptId}', '${legacyGroupId}', '${legacyLeaf}', '${legacyDispatch}', '${legacyGeneration}',
+        '/tmp/legacy', '${legacyBranch}', 'codewith', 'admitted', '${T0}', '${T0}', '${T0}'
       );
       INSERT INTO pr_group_events (
         id, group_id, attempt_id, writer_generation, sequence, idempotency_key,
         event_type, state, payload_hash, created_at
       ) VALUES (
-        'legacy-event', 'legacy-group', 'legacy-attempt', 'legacy-generation', 1,
-        'legacy-admission', 'admission', 'admitted', '${"d".repeat(64)}', '${T0}'
+        'legacy-event', '${legacyGroupId}', '${legacyAttemptId}', '${legacyGeneration}', 1,
+        'admission:${legacyAttemptId}', 'admission', 'admitted', '${"d".repeat(64)}', '${T0}'
       );
     `);
     runMigrations(upgradeDb);
 
     expect(upgradeDb.query(`
       SELECT leaf_task_id, branch, pr_number, base_sha
-      FROM pr_groups WHERE id = 'legacy-group'
-    `).get()).toEqual({
-      leaf_task_id: "legacy-leaf",
-      branch: "feat/legacy",
+      FROM pr_groups WHERE id = ?
+    `).get(legacyGroupId)).toEqual({
+      leaf_task_id: legacyLeaf,
+      branch: legacyBranch,
       pr_number: null,
       base_sha: null,
     });
     expect(upgradeDb.query(`
       SELECT repository, pr_number, base_sha
-      FROM pr_group_attempts WHERE id = 'legacy-attempt'
-    `).get()).toEqual({ repository: "hasna/todos", pr_number: null, base_sha: null });
+      FROM pr_group_attempts WHERE id = ?
+    `).get(legacyAttemptId)).toEqual({ repository: legacyRepository, pr_number: null, base_sha: null });
     expect(upgradeDb.query(`
       SELECT repository, pr_number, base_sha
       FROM pr_group_events WHERE id = 'legacy-event'
     `).get()).toEqual({ repository: "hasna/todos", pr_number: null, base_sha: null });
-    expect(upgradeDb.query("SELECT MAX(id) AS id FROM _migrations").get()).toEqual({ id: 66 });
-    upgradeDb.close();
+    expect(upgradeDb.query("SELECT MAX(id) AS id FROM _migrations").get()).toEqual({ id: 67 });
 
+    const upgradedLedger = new PrGroupLedger(new SqlitePrGroupLedgerPersistence(upgradeDb));
+    const legacyAdmission = admission({
+      root_request_id: legacyRoot,
+      repository: legacyRepository,
+      leaf_task_id: legacyLeaf,
+      dispatch_attempt: legacyDispatch,
+      writer_generation: legacyGeneration,
+      worktree: "/tmp/legacy",
+      branch: legacyBranch,
+      pr_number: null,
+      base_sha: null,
+      provider: "codewith",
+      provider_run_id: null,
+      profile_alias: null,
+    });
+    const reopened = await upgradedLedger.admit(legacyAdmission);
+    expect(reopened).toMatchObject({
+      adopted: true,
+      appended: false,
+      view: { group: { id: legacyGroupId } },
+    });
+    await expect(upgradedLedger.admit({
+      ...legacyAdmission,
+      pr_number: PR_NUMBER,
+      base_sha: BASE_A,
+    })).rejects.toMatchObject({ code: "PR_GROUP_IDENTITY_CONFLICT" });
+    expect(upgradeDb.query("SELECT COUNT(*) AS count FROM pr_groups").get()).toEqual({ count: 1 });
+
+    const recovery = {
+      group_id: legacyGroupId,
+      root_request_id: legacyRoot,
+      repository: legacyRepository,
+      leaf_task_id: legacyLeaf,
+      expected_attempt_id: legacyAttemptId,
+      dispatch_attempt: "legacy-recovery",
+      expected_generation: legacyGeneration,
+      writer_generation: "legacy-generation-2",
+      worktree: "/tmp/legacy-recovery",
+      branch: legacyBranch,
+      pr_number: null,
+      base_sha: null,
+      provider: "codewith",
+      provider_run_id: null,
+      profile_alias: null,
+      idempotency_key: "legacy-recovery",
+      recovered_at: "2026-07-23T10:01:00.000Z",
+    };
+    const recovered = await upgradedLedger.recover(recovery);
+    expect(recovered).toMatchObject({
+      appended: true,
+      view: { group: { id: legacyGroupId, active_generation: "legacy-generation-2" } },
+    });
+    expect(await upgradedLedger.recover(recovery)).toMatchObject({
+      adopted: true,
+      appended: false,
+      event: { id: recovered.event.id },
+    });
+    for (const [table, columns] of [
+      ["pr_groups", ["leaf_task_id", "branch"]],
+      ["pr_group_attempts", ["repository"]],
+      ["pr_group_events", ["repository"]],
+    ] as const) {
+      const info = upgradeDb.query(`PRAGMA table_info(${table})`).all() as Array<{
+        name: string;
+        notnull: number;
+      }>;
+      for (const column of columns) {
+        expect(info.find((entry) => entry.name === column)?.notnull).toBe(1);
+      }
+    }
+    expect(upgradeDb.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    upgradeDb.close();
+  });
+
+  test("PostgreSQL publishes the rejected-head lineage repair statements", () => {
     const postgresSql = postgresPrGroupSchemaSql().join("\n");
     expect(postgresSql).toContain("UPDATE todos_pr_groups");
     expect(postgresSql).toContain("FROM todos_pr_group_attempts");
     expect(postgresSql).toContain("UPDATE todos_pr_group_attempts");
     expect(postgresSql).toContain("UPDATE todos_pr_group_events");
+    expect(postgresSql).toContain("ADD COLUMN IF NOT EXISTS ci_proof jsonb");
+    expect(postgresSql).toContain("todos_pr_group_events_receipt_global_uidx");
+    expect(postgresSql).toContain("WHERE receipt_key IS NOT NULL");
   });
 });

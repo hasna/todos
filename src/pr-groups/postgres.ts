@@ -61,7 +61,7 @@ export function postgresPrGroupSchemaSql(): string[] {
       conditional_merge_receipt_key text, outcome text, repository text NOT NULL,
       pr_number integer, base_sha text, actor_id text, actor_run_id text,
       expected_reviewer_id text, expected_reviewer_run_id text,
-      repair_cycle integer, cleanup_proof jsonb,
+      repair_cycle integer, ci_proof jsonb, cleanup_proof jsonb,
       metadata jsonb NOT NULL DEFAULT '{}'::jsonb, payload_hash text NOT NULL,
       created_at timestamptz NOT NULL,
       UNIQUE (group_id, sequence), UNIQUE (group_id, idempotency_key),
@@ -73,6 +73,8 @@ export function postgresPrGroupSchemaSql(): string[] {
        ON todos_pr_group_events (attempt_id, sequence)`,
     `CREATE INDEX IF NOT EXISTS todos_pr_group_events_receipt_idx
        ON todos_pr_group_events (group_id, receipt_key)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS todos_pr_group_events_receipt_global_uidx
+       ON todos_pr_group_events (receipt_key) WHERE receipt_key IS NOT NULL`,
     "ALTER TABLE todos_pr_groups ADD COLUMN IF NOT EXISTS leaf_task_id text",
     "ALTER TABLE todos_pr_groups ADD COLUMN IF NOT EXISTS branch text",
     "ALTER TABLE todos_pr_groups ADD COLUMN IF NOT EXISTS pr_number integer",
@@ -92,6 +94,7 @@ export function postgresPrGroupSchemaSql(): string[] {
     "ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS expected_reviewer_id text",
     "ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS expected_reviewer_run_id text",
     "ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS repair_cycle integer",
+    "ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS ci_proof jsonb",
     "ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS cleanup_proof jsonb",
     `UPDATE todos_pr_groups AS groups
        SET leaf_task_id = COALESCE(groups.leaf_task_id, (
@@ -190,12 +193,15 @@ function eventFromRow(row: Record<string, unknown>): PrGroupEventRecord {
   if (typeof metadata === "string") metadata = JSON.parse(metadata);
   let cleanupProof = row["cleanup_proof"] ?? null;
   if (typeof cleanupProof === "string") cleanupProof = JSON.parse(cleanupProof);
+  let ciProof = row["ci_proof"] ?? null;
+  if (typeof ciProof === "string") ciProof = JSON.parse(ciProof);
   return {
     ...row,
     schema_version: Number(row["schema_version"]),
     sequence: Number(row["sequence"]),
     pr_number: row["pr_number"] === null ? null : Number(row["pr_number"]),
     repair_cycle: row["repair_cycle"] === null ? null : Number(row["repair_cycle"]),
+    ci_proof: ciProof,
     cleanup_proof: cleanupProof,
     metadata,
     created_at: normalizeTimestamp(row["created_at"])!,
@@ -307,6 +313,14 @@ class PostgresPrGroupTransaction implements PrGroupLedgerTransaction {
     return result.rows[0] ? eventFromRow(result.rows[0]) : null;
   }
 
+  async findEventByReceiptKey(receiptKey: string): Promise<PrGroupEventRecord | null> {
+    const result = await this.client.query<Record<string, unknown>>(
+      "SELECT * FROM todos_pr_group_events WHERE receipt_key = $1 ORDER BY sequence DESC LIMIT 1",
+      [receiptKey],
+    );
+    return result.rows[0] ? eventFromRow(result.rows[0]) : null;
+  }
+
   async findEvent(groupId: string, filters: {
     event_type: PrGroupEventRecord["event_type"];
     attempt_id?: string;
@@ -355,10 +369,10 @@ class PostgresPrGroupTransaction implements PrGroupLedgerTransaction {
         idempotency_key,event_type,state,message,head_sha,receipt_key,outcome,
         review_receipt_key,conditional_merge_receipt_key,repository,pr_number,base_sha,
         actor_id,actor_run_id,expected_reviewer_id,expected_reviewer_run_id,
-        repair_cycle,cleanup_proof,metadata,payload_hash,created_at
+        repair_cycle,ci_proof,cleanup_proof,metadata,payload_hash,created_at
       ) VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-        $19,$20,$21,$22,$23,$24::jsonb,$25::jsonb,$26,$27
+        $19,$20,$21,$22,$23,$24::jsonb,$25::jsonb,$26::jsonb,$27,$28
       )
       ON CONFLICT DO NOTHING RETURNING id
     `, [
@@ -368,6 +382,7 @@ class PostgresPrGroupTransaction implements PrGroupLedgerTransaction {
       event.review_receipt_key, event.conditional_merge_receipt_key,
       event.repository, event.pr_number, event.base_sha, event.actor_id, event.actor_run_id,
       event.expected_reviewer_id, event.expected_reviewer_run_id, event.repair_cycle,
+      event.ci_proof ? JSON.stringify(event.ci_proof) : null,
       event.cleanup_proof ? JSON.stringify(event.cleanup_proof) : null,
       JSON.stringify(event.metadata), event.payload_hash, event.created_at,
     ]);

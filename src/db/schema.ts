@@ -2,29 +2,35 @@ import { Database } from "bun:sqlite";
 import { MIGRATIONS } from "./migrations.js";
 
 export function runMigrations(db: Database): void {
+  let strictMigrationFailure: unknown = null;
+  const executeMigration = (migration: string, index: number): void => {
+    try {
+      db.exec(migration);
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // Migration was not running in an explicit transaction.
+      }
+      if (index + 1 >= 67) strictMigrationFailure = error;
+      // Older migrations remain best-effort because ensureSchema repairs them.
+    }
+  };
   // Check current migration level
   try {
     const result = db.query("SELECT MAX(id) as max_id FROM _migrations").get() as { max_id: number | null } | null;
     const currentLevel = result?.max_id ?? 0;
 
     for (let i = currentLevel; i < MIGRATIONS.length; i++) {
-      try {
-        db.exec(MIGRATIONS[i]!);
-      } catch {
-        // Migration partially failed (e.g. ALTER TABLE on existing column).
-        // ensureSchema below will fix any missing pieces.
-      }
+      executeMigration(MIGRATIONS[i]!, i);
     }
   } catch {
     // _migrations table doesn't exist yet, run all migrations
-    for (const migration of MIGRATIONS) {
-      try {
-        db.exec(migration);
-      } catch {
-        // Same — partial failure handled by ensureSchema
-      }
+    for (const [index, migration] of MIGRATIONS.entries()) {
+      executeMigration(migration, index);
     }
   }
+  if (strictMigrationFailure) throw strictMigrationFailure;
 
   // Ensure ALL schema elements exist regardless of migration history.
   // This is the safety net: if any migration partially failed, or if the
@@ -58,6 +64,7 @@ function backfillPlanSlugs(db: Database): void {
       }
     }
   } catch {}
+
 }
 
 export function ensureSchema(db: Database): void {
@@ -1396,7 +1403,7 @@ export function ensureSchema(db: Database): void {
       state TEXT NOT NULL,
       message TEXT,
       head_sha TEXT,
-      receipt_key TEXT,
+      receipt_key TEXT UNIQUE,
       review_receipt_key TEXT,
       conditional_merge_receipt_key TEXT,
       outcome TEXT,
@@ -1408,17 +1415,17 @@ export function ensureSchema(db: Database): void {
       expected_reviewer_id TEXT,
       expected_reviewer_run_id TEXT,
       repair_cycle INTEGER,
+      ci_proof TEXT,
       cleanup_proof TEXT,
       metadata TEXT NOT NULL DEFAULT '{}',
       payload_hash TEXT NOT NULL,
       created_at TEXT NOT NULL,
       UNIQUE(group_id, sequence),
-      UNIQUE(group_id, idempotency_key),
-      UNIQUE(group_id, receipt_key)
+      UNIQUE(group_id, idempotency_key)
     )`);
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_pr_group_events_group_sequence ON pr_group_events(group_id, sequence)");
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_pr_group_events_attempt ON pr_group_events(attempt_id, sequence)");
-  ensureIndex("CREATE INDEX IF NOT EXISTS idx_pr_group_events_receipt ON pr_group_events(group_id, receipt_key)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_pr_group_events_receipt ON pr_group_events(receipt_key)");
   ensureColumn("pr_groups", "leaf_task_id", "TEXT");
   ensureColumn("pr_groups", "branch", "TEXT");
   ensureColumn("pr_groups", "pr_number", "INTEGER");
@@ -1438,6 +1445,7 @@ export function ensureSchema(db: Database): void {
   ensureColumn("pr_group_events", "expected_reviewer_id", "TEXT");
   ensureColumn("pr_group_events", "expected_reviewer_run_id", "TEXT");
   ensureColumn("pr_group_events", "repair_cycle", "INTEGER");
+  ensureColumn("pr_group_events", "ci_proof", "TEXT");
   ensureColumn("pr_group_events", "cleanup_proof", "TEXT");
   try {
     db.exec(`
@@ -1532,6 +1540,46 @@ export function ensureSchema(db: Database): void {
         );
     `);
   } catch {}
+
+  const strictColumns = [
+    ["pr_groups", "leaf_task_id"],
+    ["pr_groups", "branch"],
+    ["pr_group_attempts", "repository"],
+    ["pr_group_events", "repository"],
+  ] as const;
+  for (const [table, column] of strictColumns) {
+    const definition = db.query(`PRAGMA table_info(${table})`).all() as Array<{
+      name: string;
+      notnull: number;
+    }>;
+    if (definition.find((entry) => entry.name === column)?.notnull !== 1) {
+      throw new Error(`PR-group schema integrity failure: ${table}.${column} is not NOT NULL`);
+    }
+  }
+  const eventColumns = db.query("PRAGMA table_info(pr_group_events)").all() as Array<{ name: string }>;
+  if (!eventColumns.some((entry) => entry.name === "ci_proof")) {
+    throw new Error("PR-group schema integrity failure: pr_group_events.ci_proof is missing");
+  }
+  const receiptIndexes = db.query("PRAGMA index_list(pr_group_events)").all() as Array<{
+    name: string;
+    unique: number;
+  }>;
+  const hasGlobalReceiptUniqueness = receiptIndexes.some((index) => {
+    if (index.unique !== 1) return false;
+    const columns = db.query(`PRAGMA index_info(${JSON.stringify(index.name)})`).all() as Array<{
+      name: string;
+    }>;
+    return columns.length === 1 && columns[0]?.name === "receipt_key";
+  });
+  if (!hasGlobalReceiptUniqueness) {
+    throw new Error("PR-group schema integrity failure: receipt_key is not globally unique");
+  }
+  const strictMigration = db.query("SELECT 1 AS ok FROM _migrations WHERE id = 67").get() as {
+    ok: number;
+  } | null;
+  if (strictMigration?.ok !== 1) {
+    throw new Error("PR-group schema integrity failure: migration 67 is not recorded");
+  }
 }
 
 export function backfillTaskTags(db: Database): void {

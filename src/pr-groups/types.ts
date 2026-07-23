@@ -138,6 +138,7 @@ export interface PrGroupEventRecord {
   expected_reviewer_id: string | null;
   expected_reviewer_run_id: string | null;
   repair_cycle: number | null;
+  ci_proof: PrGroupCiProof | null;
   cleanup_proof: PrGroupCleanupProof | null;
   metadata: Record<string, unknown>;
   payload_hash: string;
@@ -311,9 +312,20 @@ export interface AppendPrGroupEventInput {
   authenticated_actor_id?: string | null;
   authenticated_actor_run_id?: string | null;
   repair_cycle?: number | null;
+  ci_proof?: PrGroupCiProof | null;
   cleanup_proof?: PrGroupCleanupProof | null;
   metadata?: Record<string, unknown>;
   created_at?: string;
+}
+
+export interface PrGroupCiProof {
+  provider: string;
+  provider_run_id: string;
+  status: "success";
+  repository: string;
+  pr_number: number;
+  base_sha: string;
+  head_sha: string;
 }
 
 export interface PrGroupCleanupProof {
@@ -346,11 +358,13 @@ export type PrGroupLedgerErrorCode =
   | "PR_GROUP_NOT_FOUND"
   | "PR_GROUP_IDENTITY_CONFLICT"
   | "PR_GROUP_WRITER_FENCED"
+  | "PR_GROUP_WRITER_ACTIVE"
   | "PR_GROUP_TERMINAL"
   | "PR_GROUP_INVALID_TRANSITION"
   | "PR_GROUP_RECEIPT_REPLAY"
   | "PR_GROUP_EXACT_HEAD_REQUIRED"
   | "PR_GROUP_REVIEW_REQUIRED"
+  | "PR_GROUP_OPERATOR_SEPARATION_REQUIRED"
   | "PR_GROUP_MERGE_RECEIPT_REQUIRED"
   | "PR_GROUP_CLEANUP_BLOCKED"
   | "PR_GROUP_ATOMICITY_UNAVAILABLE"
@@ -377,6 +391,7 @@ export interface PrGroupLedgerTransaction {
   insertAttempt(attempt: PrGroupAttemptRecord): Promise<boolean>;
   updateAttempt(attempt: PrGroupAttemptRecord): Promise<void>;
   getEventByIdempotency(groupId: string, key: string): Promise<PrGroupEventRecord | null>;
+  findEventByReceiptKey(receiptKey: string): Promise<PrGroupEventRecord | null>;
   findEvent(groupId: string, filters: {
     event_type: PrGroupEventType;
     attempt_id?: string;

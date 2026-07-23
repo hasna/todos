@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS todos_pr_group_events (
   expected_reviewer_id text,
   expected_reviewer_run_id text,
   repair_cycle integer,
+  ci_proof jsonb,
   cleanup_proof jsonb,
   metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
   payload_hash text NOT NULL,
@@ -107,6 +108,8 @@ CREATE INDEX IF NOT EXISTS todos_pr_group_events_attempt_idx
   ON todos_pr_group_events (attempt_id, sequence);
 CREATE INDEX IF NOT EXISTS todos_pr_group_events_receipt_idx
   ON todos_pr_group_events (group_id, receipt_key);
+CREATE UNIQUE INDEX IF NOT EXISTS todos_pr_group_events_receipt_global_uidx
+  ON todos_pr_group_events (receipt_key) WHERE receipt_key IS NOT NULL;
 
 ALTER TABLE todos_pr_groups ADD COLUMN IF NOT EXISTS leaf_task_id text;
 ALTER TABLE todos_pr_groups ADD COLUMN IF NOT EXISTS branch text;
@@ -127,6 +130,7 @@ ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS actor_run_id text;
 ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS expected_reviewer_id text;
 ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS expected_reviewer_run_id text;
 ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS repair_cycle integer;
+ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS ci_proof jsonb;
 ALTER TABLE todos_pr_group_events ADD COLUMN IF NOT EXISTS cleanup_proof jsonb;
 
 UPDATE todos_pr_groups AS groups

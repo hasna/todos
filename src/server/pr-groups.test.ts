@@ -229,6 +229,20 @@ describe("shared local and cloud PR-group HTTP contract", () => {
         "idempotency_key",
       ]),
     });
+    expect(schemas.PrGroupCiProof).toMatchObject({
+      additionalProperties: false,
+      required: expect.arrayContaining([
+        "provider",
+        "provider_run_id",
+        "status",
+        "repository",
+        "pr_number",
+        "base_sha",
+        "head_sha",
+      ]),
+    });
+    expect(schemas.PrGroupEventRecord.required).toContain("ci_proof");
+    expect(schemas.AppendPrGroupEventInput.properties.ci_proof).toBeDefined();
 
     let request: Request | undefined;
     const client = new TodosV1Client({

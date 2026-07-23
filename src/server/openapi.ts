@@ -354,6 +354,23 @@ export function buildV1OpenApiDocument(version = getPackageVersion()) {
             metadata: { type: "object", additionalProperties: true },
           },
         },
+        PrGroupCiProof: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "provider", "provider_run_id", "status", "repository",
+            "pr_number", "base_sha", "head_sha",
+          ],
+          properties: {
+            provider: { type: "string", minLength: 1 },
+            provider_run_id: { type: "string", minLength: 1 },
+            status: { type: "string", enum: ["success"] },
+            repository: { type: "string", minLength: 3 },
+            pr_number: { type: "integer", minimum: 1 },
+            base_sha: { type: "string", pattern: "^[0-9a-f]{40}$" },
+            head_sha: { type: "string", pattern: "^[0-9a-f]{40}$" },
+          },
+        },
         PrGroupCleanupProof: {
           type: "object",
           additionalProperties: false,
@@ -474,7 +491,7 @@ export function buildV1OpenApiDocument(version = getPackageVersion()) {
             "receipt_key", "review_receipt_key", "conditional_merge_receipt_key", "outcome",
             "repository", "pr_number", "base_sha", "actor_id", "actor_run_id",
             "expected_reviewer_id", "expected_reviewer_run_id", "repair_cycle",
-            "cleanup_proof", "metadata", "payload_hash", "created_at",
+            "ci_proof", "cleanup_proof", "metadata", "payload_hash", "created_at",
           ],
           properties: {
             schema_version: { type: "integer", const: 1 },
@@ -522,6 +539,12 @@ export function buildV1OpenApiDocument(version = getPackageVersion()) {
             expected_reviewer_id: { type: "string", nullable: true },
             expected_reviewer_run_id: { type: "string", nullable: true },
             repair_cycle: { type: "integer", nullable: true },
+            ci_proof: {
+              oneOf: [
+                { $ref: "#/components/schemas/PrGroupCiProof" },
+                { type: "null" },
+              ],
+            },
             cleanup_proof: {
               oneOf: [
                 { $ref: "#/components/schemas/PrGroupCleanupProof" },
@@ -815,6 +838,12 @@ export function buildV1OpenApiDocument(version = getPackageVersion()) {
             expected_reviewer_id: { type: "string", nullable: true },
             expected_reviewer_run_id: { type: "string", nullable: true },
             repair_cycle: { type: "integer", nullable: true },
+            ci_proof: {
+              oneOf: [
+                { $ref: "#/components/schemas/PrGroupCiProof" },
+                { type: "null" },
+              ],
+            },
             cleanup_proof: {
               oneOf: [
                 { $ref: "#/components/schemas/PrGroupCleanupProof" },

@@ -1,4 +1,10 @@
 import {
+  deterministicLegacyPrGroupIdentity,
+  deterministicPrGroupAttemptId,
+  deterministicPrGroupEventId,
+  deterministicPrGroupId,
+} from "./ledger.js";
+import {
   PrGroupLedgerError,
   type AdmitPrGroupInput,
   type AppendPrGroupEventInput,
@@ -23,11 +29,13 @@ const LEDGER_CODES = new Set<PrGroupLedgerErrorCode>([
   "PR_GROUP_NOT_FOUND",
   "PR_GROUP_IDENTITY_CONFLICT",
   "PR_GROUP_WRITER_FENCED",
+  "PR_GROUP_WRITER_ACTIVE",
   "PR_GROUP_TERMINAL",
   "PR_GROUP_INVALID_TRANSITION",
   "PR_GROUP_RECEIPT_REPLAY",
   "PR_GROUP_EXACT_HEAD_REQUIRED",
   "PR_GROUP_REVIEW_REQUIRED",
+  "PR_GROUP_OPERATOR_SEPARATION_REQUIRED",
   "PR_GROUP_MERGE_RECEIPT_REQUIRED",
   "PR_GROUP_CLEANUP_BLOCKED",
   "PR_GROUP_ATOMICITY_UNAVAILABLE",
@@ -133,6 +141,21 @@ function schemaVersion(value: unknown, route: string, label: string): void {
   if (value !== 1) invalid(route, `${label}.schema_version must equal 1`);
 }
 
+function parseCiProof(value: unknown, route: string): void {
+  if (value === null) return;
+  const proof = closedObject(value, [
+    "provider", "provider_run_id", "status", "repository",
+    "pr_number", "base_sha", "head_sha",
+  ], route, "event.ci_proof");
+  string(proof.provider, route, "event.ci_proof.provider");
+  string(proof.provider_run_id, route, "event.ci_proof.provider_run_id");
+  if (proof.status !== "success") invalid(route, "event.ci_proof.status must equal success");
+  string(proof.repository, route, "event.ci_proof.repository");
+  integer(proof.pr_number, route, "event.ci_proof.pr_number", 1);
+  string(proof.base_sha, route, "event.ci_proof.base_sha");
+  string(proof.head_sha, route, "event.ci_proof.head_sha");
+}
+
 function parseCleanupProof(value: unknown, route: string): void {
   if (value === null) return;
   const proof = closedObject(value, [
@@ -160,7 +183,7 @@ function parseEvent(value: unknown, route: string, expectedGroupId?: string): Js
     "receipt_key", "review_receipt_key", "conditional_merge_receipt_key", "outcome",
     "repository", "pr_number", "base_sha", "actor_id", "actor_run_id",
     "expected_reviewer_id", "expected_reviewer_run_id", "repair_cycle",
-    "cleanup_proof", "metadata", "payload_hash", "created_at",
+    "ci_proof", "cleanup_proof", "metadata", "payload_hash", "created_at",
   ], route, "PR-group event");
   schemaVersion(event.schema_version, route, "event");
   string(event.id, route, "event.id");
@@ -185,6 +208,7 @@ function parseEvent(value: unknown, route: string, expectedGroupId?: string): Js
   string(event.repository, route, "event.repository");
   nullableInteger(event.pr_number, route, "event.pr_number");
   if (event.repair_cycle !== null) integer(event.repair_cycle, route, "event.repair_cycle", 1);
+  parseCiProof(event.ci_proof, route);
   parseCleanupProof(event.cleanup_proof, route);
   closedObjectLike(event.metadata, route, "event.metadata");
   string(event.payload_hash, route, "event.payload_hash");
@@ -198,7 +222,8 @@ function parseEvent(value: unknown, route: string, expectedGroupId?: string): Js
   }
   if (event.event_type === "conditional_merge_receipt" &&
       (event.receipt_key === null || event.review_receipt_key === null ||
-       event.outcome !== null || event.head_sha === null)) {
+       event.outcome !== null || event.head_sha === null || event.ci_proof === null ||
+       event.actor_id === null || event.actor_run_id === null)) {
     invalid(route, "conditional merge receipt is incomplete or contradictory");
   }
   if (event.event_type === "merge_outcome" &&
@@ -208,6 +233,18 @@ function parseEvent(value: unknown, route: string, expectedGroupId?: string): Js
   }
   if (event.event_type === "cleanup_eligible" && event.cleanup_proof === null) {
     invalid(route, "cleanup receipt is missing its durable safety proof");
+  }
+  if (event.event_type !== "conditional_merge_receipt" && event.ci_proof !== null) {
+    invalid(route, "provider CI proof is attached to a non-conditional event");
+  }
+  if (event.ci_proof !== null) {
+    const proof = event.ci_proof as Record<string, unknown>;
+    if (proof.repository !== event.repository ||
+        proof.pr_number !== event.pr_number ||
+        proof.base_sha !== event.base_sha ||
+        proof.head_sha !== event.head_sha) {
+      invalid(route, "provider CI proof does not match event repository/PR/base/head lineage");
+    }
   }
   return event;
 }
@@ -565,6 +602,132 @@ function parseMutationIdentity(
   return mutation as unknown as PrGroupMutationResult;
 }
 
+function canonicalRequestRepository(value: string): string {
+  return value.trim()
+    .replace(/^https?:\/\/[^/]+\//i, "")
+    .replace(/^git@[^:]+:/i, "")
+    .replace(/\.git$/i, "")
+    .replace(/^\/+|\/+$/g, "")
+    .toLowerCase();
+}
+
+function assertAdmitMutationIdentity(
+  result: PrGroupMutationResult,
+  input: AdmitPrGroupInput,
+  route: string,
+): PrGroupMutationResult {
+  const group = result.view.group;
+  const repository = canonicalRequestRepository(input.repository);
+  const canonicalGroupId = deterministicPrGroupId(
+    input.root_request_id,
+    input.repository,
+    input.leaf_task_id,
+    input.branch,
+    input.pr_number ?? null,
+  );
+  const legacyGroupId = deterministicLegacyPrGroupIdentity(
+    input.root_request_id,
+    input.repository,
+  ).id;
+  if (group.id !== canonicalGroupId && group.id !== legacyGroupId) {
+    invalid(route, "admission response group ID is not deterministic for the request lineage");
+  }
+  if (group.root_request_id !== input.root_request_id.trim() ||
+      group.repository !== repository ||
+      group.leaf_task_id !== input.leaf_task_id.trim() ||
+      group.branch !== input.branch.trim() ||
+      group.pr_number !== (input.pr_number ?? null) ||
+      group.base_sha !== (input.base_sha?.toLowerCase() ?? null)) {
+    invalid(route, "admission response group lineage does not match the request");
+  }
+  const expectedAttemptId = deterministicPrGroupAttemptId(
+    group.id,
+    input.leaf_task_id,
+    input.dispatch_attempt,
+  );
+  if (result.event.attempt_id !== expectedAttemptId ||
+      result.event.id !== deterministicPrGroupEventId(
+        group.id,
+        `admission:${expectedAttemptId}`,
+      ) ||
+      result.event.event_type !== "admission") {
+    invalid(route, "admission response attempt/event IDs are not deterministic for the request");
+  }
+  const attempt = result.view.attempts.find((entry) => entry.id === expectedAttemptId);
+  if (!attempt ||
+      attempt.leaf_task_id !== input.leaf_task_id.trim() ||
+      attempt.dispatch_attempt !== input.dispatch_attempt.trim() ||
+      attempt.writer_generation !== input.writer_generation.trim() ||
+      attempt.previous_attempt_id !== null ||
+      attempt.worktree !== input.worktree.trim() ||
+      attempt.branch !== input.branch.trim() ||
+      attempt.repository !== repository ||
+      attempt.pr_number !== (input.pr_number ?? null) ||
+      attempt.base_sha !== (input.base_sha?.toLowerCase() ?? null) ||
+      attempt.provider !== (input.provider?.trim() || null) ||
+      attempt.provider_run_id !== (input.provider_run_id?.trim() || null) ||
+      attempt.profile_alias !== (input.profile_alias?.trim() || null)) {
+    invalid(route, "admission response attempt lineage does not match the request");
+  }
+  return result;
+}
+
+function assertRecoverMutationIdentity(
+  result: PrGroupMutationResult,
+  input: RecoverPrGroupInput,
+  route: string,
+): PrGroupMutationResult {
+  const expectedAttemptId = deterministicPrGroupAttemptId(
+    input.group_id,
+    input.leaf_task_id,
+    input.dispatch_attempt,
+  );
+  if (result.view.group.id !== input.group_id ||
+      result.event.attempt_id !== expectedAttemptId ||
+      result.event.id !== deterministicPrGroupEventId(input.group_id, input.idempotency_key) ||
+      result.event.event_type !== "recovery") {
+    invalid(route, "recovery response IDs are not deterministic for the request");
+  }
+  const group = result.view.group;
+  if (group.root_request_id !== input.root_request_id.trim() ||
+      group.repository !== canonicalRequestRepository(input.repository) ||
+      group.leaf_task_id !== input.leaf_task_id.trim() ||
+      group.branch !== input.branch.trim() ||
+      group.pr_number !== (input.pr_number ?? null) ||
+      group.base_sha !== (input.base_sha?.toLowerCase() ?? null)) {
+    invalid(route, "recovery response group lineage does not match the request");
+  }
+  const attempt = result.view.attempts.find((entry) => entry.id === expectedAttemptId);
+  if (!attempt ||
+      attempt.leaf_task_id !== input.leaf_task_id.trim() ||
+      attempt.dispatch_attempt !== input.dispatch_attempt.trim() ||
+      attempt.writer_generation !== input.writer_generation.trim() ||
+      attempt.previous_attempt_id !== input.expected_attempt_id.trim() ||
+      attempt.worktree !== input.worktree.trim() ||
+      attempt.branch !== input.branch.trim() ||
+      attempt.repository !== canonicalRequestRepository(input.repository) ||
+      attempt.pr_number !== (input.pr_number ?? null) ||
+      attempt.base_sha !== (input.base_sha?.toLowerCase() ?? null) ||
+      attempt.provider !== (input.provider?.trim() || null) ||
+      attempt.provider_run_id !== (input.provider_run_id?.trim() || null) ||
+      attempt.profile_alias !== (input.profile_alias?.trim() || null)) {
+    invalid(route, "recovery response attempt lineage does not match the request");
+  }
+  return result;
+}
+
+function assertAppendMutationIdentity(
+  result: PrGroupMutationResult,
+  input: AppendPrGroupEventInput,
+  route: string,
+): PrGroupMutationResult {
+  if (result.event.id !== deterministicPrGroupEventId(input.group_id, input.idempotency_key) ||
+      result.event.event_type !== input.event_type) {
+    invalid(route, "event response ID/type is not deterministic for the request");
+  }
+  return result;
+}
+
 export class PrGroupHttpClient {
   private readonly baseUrl: string;
   private readonly prefix: "/api/pr-groups" | "/v1/pr-groups";
@@ -622,13 +785,13 @@ export class PrGroupHttpClient {
 
   async admit(input: AdmitPrGroupInput): Promise<PrGroupMutationResult> {
     const result = await this.request<unknown>("POST", "/admit", input);
-    return parseMutationIdentity(
+    return assertAdmitMutationIdentity(parseMutationIdentity(
       result,
       undefined,
       undefined,
       this.options.expectedAuthority,
       "/admit",
-    );
+    ), input, "/admit");
   }
 
   async recover(input: RecoverPrGroupInput): Promise<PrGroupMutationResult> {
@@ -637,13 +800,13 @@ export class PrGroupHttpClient {
       `/${encodeURIComponent(input.group_id)}/recover`,
       input,
     );
-    return parseMutationIdentity(
+    return assertRecoverMutationIdentity(parseMutationIdentity(
       result,
       input.group_id,
       undefined,
       this.options.expectedAuthority,
       "/recover",
-    );
+    ), input, "/recover");
   }
 
   async append(input: AppendPrGroupEventInput): Promise<PrGroupMutationResult> {
@@ -652,13 +815,13 @@ export class PrGroupHttpClient {
       `/${encodeURIComponent(input.group_id)}/events`,
       input,
     );
-    return parseMutationIdentity(
+    return assertAppendMutationIdentity(parseMutationIdentity(
       result,
       input.group_id,
       input.attempt_id,
       this.options.expectedAuthority,
       "/events",
-    );
+    ), input, "/events");
   }
 
   async get(groupId: string): Promise<PrGroupStateView> {

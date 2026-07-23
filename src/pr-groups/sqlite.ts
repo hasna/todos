@@ -40,6 +40,9 @@ function eventFromRow(row: Record<string, unknown>): PrGroupEventRecord {
     sequence: Number(row["sequence"]),
     pr_number: row["pr_number"] === null ? null : Number(row["pr_number"]),
     repair_cycle: row["repair_cycle"] === null ? null : Number(row["repair_cycle"]),
+    ci_proof: row["ci_proof"]
+      ? parseJson(String(row["ci_proof"]))
+      : null,
     cleanup_proof: row["cleanup_proof"]
       ? parseJson(String(row["cleanup_proof"]))
       : null,
@@ -145,6 +148,13 @@ class SqlitePrGroupTransaction implements PrGroupLedgerTransaction {
     return row ? eventFromRow(row) : null;
   }
 
+  async findEventByReceiptKey(receiptKey: string): Promise<PrGroupEventRecord | null> {
+    const row = this.db.query(
+      "SELECT * FROM pr_group_events WHERE receipt_key = ? ORDER BY sequence DESC LIMIT 1",
+    ).get(receiptKey) as Record<string, unknown> | null;
+    return row ? eventFromRow(row) : null;
+  }
+
   async findEvent(groupId: string, filters: {
     event_type: PrGroupEventRecord["event_type"];
     attempt_id?: string;
@@ -193,9 +203,9 @@ class SqlitePrGroupTransaction implements PrGroupLedgerTransaction {
         idempotency_key, event_type, state, message, head_sha, receipt_key,
         review_receipt_key, conditional_merge_receipt_key, outcome,
         repository, pr_number, base_sha, actor_id, actor_run_id,
-        expected_reviewer_id, expected_reviewer_run_id, repair_cycle, cleanup_proof,
-        metadata, payload_hash, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        expected_reviewer_id, expected_reviewer_run_id, repair_cycle, ci_proof,
+        cleanup_proof, metadata, payload_hash, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       event.schema_version, event.id, event.group_id, event.attempt_id,
       event.writer_generation, event.sequence, event.idempotency_key, event.event_type,
@@ -203,6 +213,7 @@ class SqlitePrGroupTransaction implements PrGroupLedgerTransaction {
       event.review_receipt_key, event.conditional_merge_receipt_key, event.outcome,
       event.repository, event.pr_number, event.base_sha, event.actor_id, event.actor_run_id,
       event.expected_reviewer_id, event.expected_reviewer_run_id, event.repair_cycle,
+      event.ci_proof ? JSON.stringify(event.ci_proof) : null,
       event.cleanup_proof ? JSON.stringify(event.cleanup_proof) : null,
       JSON.stringify(event.metadata), event.payload_hash, event.created_at,
     );

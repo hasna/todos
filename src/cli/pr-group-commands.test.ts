@@ -62,6 +62,8 @@ describe("PR-group CLI views", () => {
       writer_generation: "generation-1",
       worktree: "/tmp/pr-group",
       branch: "feat/pr-group",
+      pr_number: 78,
+      base_sha: "a".repeat(40),
     });
     db.close();
 
@@ -103,5 +105,29 @@ describe("PR-group CLI views", () => {
     expect(result.stderr).toMatch(/local SQLite fallback is disabled/i);
     expect(existsSync(shadowPath)).toBe(false);
     expect(result.stdout.trim()).toBe("");
+  });
+
+  test("malformed authoritative remote envelopes map to REMOTE_API_INCOMPATIBLE", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => Response.json({ view: { authoritative: true } }),
+    });
+    try {
+      const shadowPath = join(dir, "malformed-must-not-exist.db");
+      const env = childEnv();
+      env["HASNA_TODOS_STORAGE_MODE"] = "remote";
+      env["TODOS_STORAGE_MODE"] = "remote";
+      env["HASNA_TODOS_API_URL"] = `http://127.0.0.1:${server.port}`;
+      env["HASNA_TODOS_API_KEY"] = "opaque-test-key";
+      env["HASNA_TODOS_DB_PATH"] = shadowPath;
+      const result = await run(["plans", "pr-group", "show", "prg_malformed", "--json"], env);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain("REMOTE_API_INCOMPATIBLE");
+      expect(result.stderr).toMatch(/local SQLite fallback is disabled/i);
+      expect(existsSync(shadowPath)).toBe(false);
+      expect(result.stdout.trim()).toBe("");
+    } finally {
+      server.stop(true);
+    }
   });
 });

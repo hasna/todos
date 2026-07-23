@@ -35,6 +35,7 @@ function completeRemoteView(groupId = "prg_test"): Record<string, any> {
     expected_reviewer_id: null,
     expected_reviewer_run_id: null,
     repair_cycle: null,
+    ci_proof: null,
     cleanup_proof: null,
     metadata: {},
     payload_hash: "c".repeat(64),
@@ -499,6 +500,74 @@ describe("PR-group fail-closed HTTP client", () => {
       writer_generation: "generation-1",
       idempotency_key: "event-1",
       event_type: "progress",
+    })).rejects.toMatchObject({ code: "PR_GROUP_REMOTE_INVALID_RESPONSE" });
+  });
+
+  test("rejects mutation envelopes whose returned IDs are not deterministic for the request", async () => {
+    const forgedAdmission = completeRemoteView("prg_forged");
+    const admitClient = new PrGroupHttpClient({
+      baseUrl: "https://todos.example.test",
+      apiPrefix: "/v1/pr-groups",
+      expectedAuthority: "remote",
+      fetchImpl: (async () => Response.json({
+        created: true,
+        adopted: false,
+        appended: true,
+        event: forgedAdmission.latest_event,
+        view: forgedAdmission,
+      })) as typeof fetch,
+    });
+    await expect(admitClient.admit({
+      root_request_id: "root-request",
+      repository: "hasna/todos",
+      leaf_task_id: "leaf-task",
+      dispatch_attempt: "dispatch-1",
+      writer_generation: "generation-1",
+      worktree: "/tmp/pr-group",
+      branch: "feat/pr-group",
+      pr_number: 78,
+      base_sha: BASE,
+      provider: "codewith",
+      provider_run_id: "run-1",
+      profile_alias: "account012",
+      admitted_at: T0,
+    })).rejects.toMatchObject({ code: "PR_GROUP_REMOTE_INVALID_RESPONSE" });
+
+    const forgedRecovery = completeRemoteView("prg_expected");
+    forgedRecovery.attempts[0].dispatch_attempt = "dispatch-2";
+    forgedRecovery.attempts[0].writer_generation = "generation-2";
+    forgedRecovery.attempts[0].previous_attempt_id = "pra_previous";
+    forgedRecovery.latest_event.idempotency_key = "recovery-1";
+    const recoverClient = new PrGroupHttpClient({
+      baseUrl: "https://todos.example.test",
+      apiPrefix: "/v1/pr-groups",
+      expectedAuthority: "remote",
+      fetchImpl: (async () => Response.json({
+        created: false,
+        adopted: false,
+        appended: true,
+        event: forgedRecovery.latest_event,
+        view: forgedRecovery,
+      })) as typeof fetch,
+    });
+    await expect(recoverClient.recover({
+      group_id: "prg_expected",
+      root_request_id: "root-request",
+      repository: "hasna/todos",
+      leaf_task_id: "leaf-task",
+      expected_attempt_id: "pra_previous",
+      dispatch_attempt: "dispatch-2",
+      expected_generation: "generation-1",
+      writer_generation: "generation-2",
+      worktree: "/tmp/pr-group",
+      branch: "feat/pr-group",
+      pr_number: 78,
+      base_sha: BASE,
+      provider: "codewith",
+      provider_run_id: "run-2",
+      profile_alias: "account012",
+      idempotency_key: "recovery-1",
+      recovered_at: T0,
     })).rejects.toMatchObject({ code: "PR_GROUP_REMOTE_INVALID_RESPONSE" });
   });
 });

@@ -15,6 +15,7 @@ export type {
   AppendPrGroupEventInput,
   PrGroupAdapterViews,
   PrGroupAttemptRecord,
+  PrGroupCiProof,
   PrGroupCleanupProof,
   PrGroupDecisionEnvelopeAdapter,
   PrGroupEventListOptions,

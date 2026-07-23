@@ -373,7 +373,7 @@ function assertRemotePrGroupView(value: unknown, route: string): PrGroupStateVie
     return parsePrGroupStateView(value, "remote", route);
   } catch (error) {
     throw new Error(
-      `REMOTE_PR_GROUP_INVALID_RESPONSE: ${route} did not return a complete closed authoritative remote projection; ` +
+      `REMOTE_API_INCOMPATIBLE: ${route} did not return a complete closed authoritative remote projection; ` +
         "local SQLite fallback is disabled",
       { cause: error },
     );
@@ -388,7 +388,7 @@ export async function cloudGetPrGroup(client: HasnaStorageClient, groupId: strin
   if (!raw || typeof raw !== "object" || Array.isArray(raw) ||
       Object.keys(raw).length !== 1 || !("view" in raw)) {
     throw new Error(
-      `REMOTE_PR_GROUP_INVALID_RESPONSE: ${route} returned a non-authoritative response envelope; ` +
+      `REMOTE_API_INCOMPATIBLE: ${route} returned a non-authoritative response envelope; ` +
         "local SQLite fallback is disabled",
     );
   }
@@ -396,7 +396,7 @@ export async function cloudGetPrGroup(client: HasnaStorageClient, groupId: strin
   const authoritative = assertRemotePrGroupView(view, route);
   if (authoritative.group?.id !== groupId) {
     throw new Error(
-      `REMOTE_PR_GROUP_INVALID_RESPONSE: ${route} returned a different PR-group identity; ` +
+      `REMOTE_API_INCOMPATIBLE: ${route} returned a different PR-group identity; ` +
         "local SQLite fallback is disabled",
     );
   }
@@ -420,7 +420,7 @@ export async function cloudPrGroupEvents(
   if (!raw || typeof raw !== "object" || Array.isArray(raw) ||
       Object.keys(raw).length !== 1 || !("history" in raw)) {
     throw new Error(
-      `REMOTE_PR_GROUP_INVALID_RESPONSE: ${route} returned a non-authoritative response envelope; ` +
+      `REMOTE_API_INCOMPATIBLE: ${route} returned a non-authoritative response envelope; ` +
         "local SQLite fallback is disabled",
     );
   }
@@ -428,7 +428,7 @@ export async function cloudPrGroupEvents(
     return parsePrGroupEventPage((raw as { history: unknown }).history, "remote", route, groupId);
   } catch (error) {
     throw new Error(
-      `REMOTE_PR_GROUP_INVALID_RESPONSE: ${route} did not return a complete closed authoritative remote event page; ` +
+      `REMOTE_API_INCOMPATIBLE: ${route} did not return a complete closed authoritative remote event page; ` +
         "local SQLite fallback is disabled",
       { cause: error },
     );

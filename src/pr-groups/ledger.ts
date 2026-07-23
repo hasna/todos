@@ -7,6 +7,7 @@ import {
   type AppendPrGroupEventInput,
   type PrGroupAttemptRecord,
   type PrGroupAttemptStatus,
+  type PrGroupCiProof,
   type PrGroupCleanupProof,
   type PrGroupEventListOptions,
   type PrGroupEventOutcome,
@@ -32,6 +33,7 @@ const CREDENTIAL_PATTERN = /\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}|\b(?:sk|
 const AUTH_PATH_PATTERN = /(?:^|[/\\])(?:\.ssh|\.aws|credentials|auth(?:\.json)?)(?=[/\\\s]|$)/i;
 const STATE_VIEW_ATTEMPT_LIMIT = 100;
 const STATE_VIEW_EVENT_LIMIT = 500;
+export const PR_GROUP_WRITER_STALE_AFTER_MS = 30_000;
 const APPENDABLE_EVENT_TYPES = new Set<AppendPrGroupEventInput["event_type"]>([
   "started",
   "progress",
@@ -227,6 +229,17 @@ export function deterministicPrGroupId(
   return `prg_${sha256(`pr-group:v1\0${root}\0${repo}\0${leaf}\0${normalizedBranch}\0${pr ?? "none"}`).slice(0, 32)}`;
 }
 
+export function deterministicLegacyPrGroupIdentity(rootRequestId: string, repository: string): {
+  id: string;
+  identity_key: string;
+} {
+  const identityKey = sha256(`pr-group:v1\0${rootRequestId}\0${repository}`);
+  return {
+    id: `prg_${identityKey.slice(0, 32)}`,
+    identity_key: identityKey,
+  };
+}
+
 export function deterministicPrGroupAttemptId(
   groupId: string,
   leafTaskId: string,
@@ -238,7 +251,7 @@ export function deterministicPrGroupAttemptId(
   return `pra_${sha256(`pr-attempt:v1\0${group}\0${leaf}\0${dispatch}`).slice(0, 32)}`;
 }
 
-function deterministicEventId(groupId: string, key: string): string {
+export function deterministicPrGroupEventId(groupId: string, key: string): string {
   return `pre_${sha256(`pr-event:v1\0${groupId}\0${key}`).slice(0, 32)}`;
 }
 
@@ -449,6 +462,48 @@ function normalizeCleanupProof(value: unknown): PrGroupCleanupProof {
   };
 }
 
+function normalizeCiProof(value: unknown): PrGroupCiProof {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new PrGroupLedgerError(
+      "PR_GROUP_EXACT_HEAD_REQUIRED",
+      "conditional merge requires a typed provider CI success proof",
+    );
+  }
+  const proof = value as Record<string, unknown>;
+  const allowed = new Set([
+    "provider",
+    "provider_run_id",
+    "status",
+    "repository",
+    "pr_number",
+    "base_sha",
+    "head_sha",
+  ]);
+  if (Object.keys(proof).some((key) => !allowed.has(key)) || proof.status !== "success") {
+    throw new PrGroupLedgerError(
+      "PR_GROUP_EXACT_HEAD_REQUIRED",
+      "provider CI proof must be a closed successful exact-head envelope",
+    );
+  }
+  const prNumber = normalizePrNumber(proof.pr_number);
+  const baseSha = normalizeBaseSha(proof.base_sha);
+  if (prNumber === null || baseSha === null) {
+    throw new PrGroupLedgerError(
+      "PR_GROUP_EXACT_HEAD_REQUIRED",
+      "provider CI proof requires concrete PR and base identity",
+    );
+  }
+  return {
+    provider: safeReference(proof.provider, "ci_proof.provider"),
+    provider_run_id: safeReference(proof.provider_run_id, "ci_proof.provider_run_id"),
+    status: "success",
+    repository: normalizeRepository(requiredReference(proof.repository, "ci_proof.repository")),
+    pr_number: prNumber,
+    base_sha: baseSha,
+    head_sha: normalizeHead(requiredReference(proof.head_sha, "ci_proof.head_sha"), true)!,
+  };
+}
+
 function assertLegalTransition(group: PrGroupRecord, eventType: PrGroupEventType): void {
   if (group.terminal_outcome) {
     if (eventType !== "cleanup_eligible") {
@@ -506,9 +561,14 @@ export class PrGroupLedger {
     ]);
     const attemptsOmitted = allAttempts.length > STATE_VIEW_ATTEMPT_LIMIT;
     const attempts = allAttempts.slice(-STATE_VIEW_ATTEMPT_LIMIT);
-    const events = eventWindow.slice(0, STATE_VIEW_EVENT_LIMIT);
-    const receipts = receiptWindow.slice(0, STATE_VIEW_EVENT_LIMIT);
-    const receiptHistoryComplete = receiptWindow.length <= STATE_VIEW_EVENT_LIMIT;
+    const visibleAttemptIds = new Set(attempts.map((attempt) => attempt.id));
+    const events = eventWindow
+      .filter((event) => visibleAttemptIds.has(event.attempt_id))
+      .slice(0, STATE_VIEW_EVENT_LIMIT);
+    const receipts = receiptWindow
+      .filter((event) => visibleAttemptIds.has(event.attempt_id))
+      .slice(0, STATE_VIEW_EVENT_LIMIT);
+    const receiptHistoryComplete = !attemptsOmitted && receiptWindow.length <= STATE_VIEW_EVENT_LIMIT;
     const evidenceRefs = events.map((event) => ({
       kind: "EvidenceRef" as const,
       id: event.id,
@@ -646,42 +706,93 @@ export class PrGroupLedger {
         "pr_number and base_sha must be admitted together when PR identity is known",
       );
     }
-    const groupId = deterministicPrGroupId(rootRequestId, repository, leafTaskId, branch, prNumber);
+    const canonicalGroupId = deterministicPrGroupId(
+      rootRequestId,
+      repository,
+      leafTaskId,
+      branch,
+      prNumber,
+    );
+    const legacyIdentity = deterministicLegacyPrGroupIdentity(rootRequestId, repository);
     const provider = safeOptionalReference(raw.provider, "provider");
     const providerRunId = safeOptionalReference(raw.provider_run_id, "provider_run_id");
     const profileAlias = safeProfileAlias(raw.profile_alias);
-    const attemptId = deterministicPrGroupAttemptId(groupId, leafTaskId, dispatchAttempt);
-    const identityKey = sha256(
+    const canonicalIdentityKey = sha256(
       `pr-group:v1\0${rootRequestId}\0${repository}\0${leafTaskId}\0${branch}\0${prNumber ?? "none"}\0${baseSha ?? "none"}`,
     );
-    const idempotencyKey = `admission:${attemptId}`;
     const metadata = {};
-    const eventPayloadHash = payloadForHash({
-      attempt_id: attemptId,
-      writer_generation: writerGeneration,
-      event_type: "admission",
-      message: null,
-      head_sha: null,
-      receipt_key: null,
-      review_receipt_key: null,
-      conditional_merge_receipt_key: null,
-      outcome: null,
-      repository,
-      pr_number: prNumber,
-      base_sha: baseSha,
-      actor_id: null,
-      actor_run_id: null,
-      expected_reviewer_id: null,
-      expected_reviewer_run_id: null,
-      repair_cycle: null,
-      cleanup_proof: null,
-      metadata,
-    });
 
     const event = await this.persistence.transaction(async (tx) => {
+      let groupId = canonicalGroupId;
+      let identityKey = canonicalIdentityKey;
+      let usesLegacyIdentity = false;
       let group = await tx.getGroup(groupId, true);
+      if (!group && legacyIdentity.id !== canonicalGroupId) {
+        const legacyGroup = await tx.getGroup(legacyIdentity.id, true);
+        if (legacyGroup &&
+            legacyGroup.identity_key === legacyIdentity.identity_key &&
+            legacyGroup.root_request_id === rootRequestId &&
+            legacyGroup.repository === repository &&
+            legacyGroup.leaf_task_id === leafTaskId &&
+            legacyGroup.branch === branch &&
+            legacyGroup.pr_number === prNumber &&
+            legacyGroup.base_sha === baseSha) {
+          group = legacyGroup;
+          groupId = legacyIdentity.id;
+          identityKey = legacyIdentity.identity_key;
+          usesLegacyIdentity = true;
+        } else if (legacyGroup &&
+            legacyGroup.identity_key === legacyIdentity.identity_key &&
+            legacyGroup.root_request_id === rootRequestId &&
+            legacyGroup.repository === repository &&
+            legacyGroup.leaf_task_id === leafTaskId &&
+            legacyGroup.branch === branch) {
+          throw new PrGroupLedgerError(
+            "PR_GROUP_IDENTITY_CONFLICT",
+            "legacy PR identity cannot be rebound from null or a different PR/base without splitting authority",
+            {
+              group_id: legacyGroup.id,
+              persisted_pr_number: legacyGroup.pr_number,
+              requested_pr_number: prNumber,
+              persisted_base_sha: legacyGroup.base_sha,
+              requested_base_sha: baseSha,
+            },
+          );
+        }
+      }
+      const attemptId = deterministicPrGroupAttemptId(groupId, leafTaskId, dispatchAttempt);
+      const idempotencyKey = `admission:${attemptId}`;
+      const eventPayloadHash = payloadForHash({
+        attempt_id: attemptId,
+        writer_generation: writerGeneration,
+        event_type: "admission",
+        message: null,
+        head_sha: null,
+        receipt_key: null,
+        review_receipt_key: null,
+        conditional_merge_receipt_key: null,
+        outcome: null,
+        repository,
+        pr_number: prNumber,
+        base_sha: baseSha,
+        actor_id: null,
+        actor_run_id: null,
+        expected_reviewer_id: null,
+        expected_reviewer_run_id: null,
+        repair_cycle: null,
+        ci_proof: null,
+        cleanup_proof: null,
+        metadata,
+      });
       let created = false;
       if (!group) {
+        if (prNumber === null || baseSha === null) {
+          throw new PrGroupLedgerError(
+            "PR_GROUP_IDENTITY_CONFLICT",
+            "new PR-group admissions require concrete PR number and base SHA identity",
+            { root_request_id: rootRequestId, repository, leaf_task_id: leafTaskId, branch },
+          );
+        }
         const candidate: PrGroupRecord = {
           schema_version: PR_GROUP_LEDGER_SCHEMA_VERSION,
           id: groupId,
@@ -728,13 +839,6 @@ export class PrGroupLedger {
         pr_number: prNumber,
         base_sha: baseSha,
       });
-      if (group.terminal_outcome) {
-        throw new PrGroupLedgerError(
-          "PR_GROUP_TERMINAL",
-          "terminal PR group history cannot be reopened",
-          { group_id: groupId, terminal_outcome: group.terminal_outcome },
-        );
-      }
 
       const identity = {
         leaf_task_id: leafTaskId,
@@ -751,6 +855,31 @@ export class PrGroupLedger {
       };
       let attempt = await tx.getAttempt(attemptId);
       if (attempt) assertAttemptIdentity(attempt, identity);
+      const existingAdmission = await tx.getEventByIdempotency(groupId, idempotencyKey);
+      if (existingAdmission) {
+        if (usesLegacyIdentity) {
+          if (!attempt ||
+              existingAdmission.event_type !== "admission" ||
+              existingAdmission.attempt_id !== attemptId ||
+              existingAdmission.writer_generation !== writerGeneration) {
+            throw new PrGroupLedgerError(
+              "PR_GROUP_RECEIPT_REPLAY",
+              "legacy admission receipt does not match the upgraded immutable attempt",
+              { group_id: groupId, idempotency_key: idempotencyKey },
+            );
+          }
+          return { event: existingAdmission, created: false, adopted: true, appended: false };
+        }
+        const existing = await existingEventOrThrow(tx, groupId, idempotencyKey, eventPayloadHash);
+        return { event: existing!, created: false, adopted: true, appended: false };
+      }
+      if (group.terminal_outcome) {
+        throw new PrGroupLedgerError(
+          "PR_GROUP_TERMINAL",
+          "terminal PR group history cannot be reopened",
+          { group_id: groupId, terminal_outcome: group.terminal_outcome },
+        );
+      }
       if (group.active_attempt_id !== attemptId || group.active_generation !== writerGeneration) {
         throw new PrGroupLedgerError(
           "PR_GROUP_WRITER_FENCED",
@@ -803,11 +932,9 @@ export class PrGroupLedger {
         }
       }
 
-      const existing = await existingEventOrThrow(tx, groupId, idempotencyKey, eventPayloadHash);
-      if (existing) return { event: existing, created: false, adopted: true, appended: false };
       const admissionEvent: PrGroupEventRecord = {
         schema_version: PR_GROUP_LEDGER_SCHEMA_VERSION,
-        id: deterministicEventId(groupId, idempotencyKey),
+        id: deterministicPrGroupEventId(groupId, idempotencyKey),
         group_id: groupId,
         attempt_id: attemptId,
         writer_generation: writerGeneration,
@@ -829,6 +956,7 @@ export class PrGroupLedger {
         expected_reviewer_id: null,
         expected_reviewer_run_id: null,
         repair_cycle: null,
+        ci_proof: null,
         cleanup_proof: null,
         metadata,
         payload_hash: eventPayloadHash,
@@ -842,7 +970,7 @@ export class PrGroupLedger {
       return { event: admissionEvent, created, adopted: false, appended: true };
     });
 
-    return { ...event, view: await this.get(groupId) };
+    return { ...event, view: await this.get(event.event.group_id) };
   }
 
   async recover(raw: RecoverPrGroupInput): Promise<PrGroupMutationResult> {
@@ -868,7 +996,16 @@ export class PrGroupLedger {
       );
     }
     const expectedGroupId = deterministicPrGroupId(rootRequestId, repository, leafTaskId, branch, prNumber);
-    if (expectedGroupId !== groupId) {
+    const canonicalIdentityKey = sha256(
+      `pr-group:v1\0${rootRequestId}\0${repository}\0${leafTaskId}\0${branch}\0${prNumber ?? "none"}\0${baseSha ?? "none"}`,
+    );
+    const legacyIdentity = deterministicLegacyPrGroupIdentity(rootRequestId, repository);
+    const expectedIdentityKey = groupId === expectedGroupId
+      ? canonicalIdentityKey
+      : groupId === legacyIdentity.id
+        ? legacyIdentity.identity_key
+        : null;
+    if (!expectedIdentityKey) {
       throw new PrGroupLedgerError(
         "PR_GROUP_IDENTITY_CONFLICT",
         "recovery lineage derives a different deterministic PR-group identity",
@@ -910,6 +1047,13 @@ export class PrGroupLedger {
     const result = await this.persistence.transaction(async (tx) => {
       const group = await tx.getGroup(groupId, true);
       if (!group) throw new PrGroupLedgerError("PR_GROUP_NOT_FOUND", `PR group not found: ${groupId}`);
+      if (group.identity_key !== expectedIdentityKey) {
+        throw new PrGroupLedgerError(
+          "PR_GROUP_IDENTITY_CONFLICT",
+          "recovery group identity is incompatible with its canonical or legacy lineage",
+          { group_id: groupId },
+        );
+      }
       assertGroupLineage(group, {
         root_request_id: rootRequestId,
         repository,
@@ -1005,6 +1149,21 @@ export class PrGroupLedger {
           },
         );
       }
+      const leaseReference = previous.last_heartbeat_at ?? previous.updated_at ?? previous.admitted_at;
+      const staleAt = Date.parse(leaseReference) + PR_GROUP_WRITER_STALE_AFTER_MS;
+      if (Date.parse(recoveredAt) < staleAt) {
+        throw new PrGroupLedgerError(
+          "PR_GROUP_WRITER_ACTIVE",
+          "active writer cannot be recovered before its authoritative stale-writer lease expires",
+          {
+            group_id: groupId,
+            expected_attempt_id: expectedAttemptId,
+            lease_reference: leaseReference,
+            stale_at: new Date(staleAt).toISOString(),
+            recovered_at: recoveredAt,
+          },
+        );
+      }
       previous.status = "fenced";
       previous.fenced_at = recoveredAt;
       previous.updated_at = recoveredAt;
@@ -1048,7 +1207,7 @@ export class PrGroupLedger {
 
       const event: PrGroupEventRecord = {
         schema_version: PR_GROUP_LEDGER_SCHEMA_VERSION,
-        id: deterministicEventId(groupId, idempotencyKey),
+        id: deterministicPrGroupEventId(groupId, idempotencyKey),
         group_id: groupId,
         attempt_id: attemptId,
         writer_generation: writerGeneration,
@@ -1070,6 +1229,7 @@ export class PrGroupLedger {
         expected_reviewer_id: null,
         expected_reviewer_run_id: null,
         repair_cycle: null,
+        ci_proof: null,
         cleanup_proof: null,
         metadata: { ...metadata, previous_attempt_id: previous.id },
         payload_hash: eventPayloadHash,
@@ -1153,6 +1313,15 @@ export class PrGroupLedger {
     if (eventType !== "cleanup_eligible" && raw.cleanup_proof !== undefined && raw.cleanup_proof !== null) {
       throw new PrGroupLedgerError("PR_GROUP_INVALID_INPUT", "cleanup_proof is reserved for cleanup_eligible");
     }
+    const ciProof = eventType === "conditional_merge_receipt"
+      ? normalizeCiProof(raw.ci_proof)
+      : null;
+    if (eventType !== "conditional_merge_receipt" && raw.ci_proof !== undefined && raw.ci_proof !== null) {
+      throw new PrGroupLedgerError(
+        "PR_GROUP_INVALID_INPUT",
+        "ci_proof is reserved for conditional_merge_receipt",
+      );
+    }
 
     if (["review_receipt", "conditional_merge_receipt", "merge_outcome"].includes(eventType) && !receiptKey) {
       throw new PrGroupLedgerError("PR_GROUP_INVALID_INPUT", `${eventType} requires receipt_key`);
@@ -1223,6 +1392,13 @@ export class PrGroupLedger {
       throw new PrGroupLedgerError(
         "PR_GROUP_INVALID_INPUT",
         "conditional_merge_receipt_key is reserved for merge outcomes",
+      );
+    }
+    if ((eventType === "conditional_merge_receipt" || eventType === "merge_outcome") &&
+        (!actorId || !actorRunId)) {
+      throw new PrGroupLedgerError(
+        "PR_GROUP_OPERATOR_SEPARATION_REQUIRED",
+        `${eventType} requires a durable merge-operator identity and run`,
       );
     }
     if (!["repair_accepted", "repair_rejected"].includes(eventType) && repairCycle !== null) {
@@ -1301,6 +1477,7 @@ export class PrGroupLedger {
         expected_reviewer_id: expectedReviewerId,
         expected_reviewer_run_id: expectedReviewerRunId,
         repair_cycle: repairCycle,
+        ci_proof: ciProof,
         cleanup_proof: cleanupProof,
         metadata,
         created_at: createdAtWasSupplied ? createdAt : null,
@@ -1338,19 +1515,7 @@ export class PrGroupLedger {
       }
 
       if (receiptKey) {
-        const receiptReplay = await tx.findEvent(groupId, {
-          event_type: eventType,
-          receipt_key: receiptKey,
-        }) ?? await tx.findEvent(groupId, {
-          event_type: "review_receipt",
-          receipt_key: receiptKey,
-        }) ?? await tx.findEvent(groupId, {
-          event_type: "conditional_merge_receipt",
-          receipt_key: receiptKey,
-        }) ?? await tx.findEvent(groupId, {
-          event_type: "merge_outcome",
-          receipt_key: receiptKey,
-        });
+        const receiptReplay = await tx.findEventByReceiptKey(receiptKey);
         if (receiptReplay) {
           throw new PrGroupLedgerError(
             "PR_GROUP_RECEIPT_REPLAY",
@@ -1365,12 +1530,11 @@ export class PrGroupLedger {
         const request = await tx.findEvent(groupId, {
           event_type: "review_requested",
           attempt_id: attemptId,
-          head_sha: headSha,
         });
-        if (!request) {
+        if (!request || request.head_sha !== headSha) {
           throw new PrGroupLedgerError(
             "PR_GROUP_EXACT_HEAD_REQUIRED",
-            "review receipt requires a review request bound to the same attempt and exact head",
+            "review receipt requires the latest review request bound to the same attempt and exact head",
             { group_id: groupId, attempt_id: attemptId, head_sha: headSha },
           );
         }
@@ -1387,14 +1551,38 @@ export class PrGroupLedger {
         latestReview = await tx.findEvent(groupId, {
           event_type: "review_receipt",
           attempt_id: attemptId,
-          head_sha: headSha,
+        });
+        const latestRequest = await tx.findEvent(groupId, {
+          event_type: "review_requested",
+          attempt_id: attemptId,
         });
         if (!latestReview ||
+            !latestRequest ||
+            latestRequest.head_sha !== headSha ||
+            latestReview.head_sha !== headSha ||
             latestReview.outcome !== "approved" ||
             latestReview.receipt_key !== reviewReceiptKey) {
           throw new PrGroupLedgerError(
             "PR_GROUP_REVIEW_REQUIRED",
             "conditional merge requires the latest sequence-aware review to be the bound exact-head approval",
+            { group_id: groupId, attempt_id: attemptId, head_sha: headSha },
+          );
+        }
+        if (latestReview.actor_id === actorId || latestReview.actor_run_id === actorRunId) {
+          throw new PrGroupLedgerError(
+            "PR_GROUP_OPERATOR_SEPARATION_REQUIRED",
+            "conditional merge operator must be distinct from the exact-head reviewer",
+            { group_id: groupId, attempt_id: attemptId, reviewer_id: latestReview.actor_id },
+          );
+        }
+        if (!ciProof ||
+            ciProof.repository !== eventRepository ||
+            ciProof.pr_number !== eventPrNumber ||
+            ciProof.base_sha !== eventBaseSha ||
+            ciProof.head_sha !== headSha) {
+          throw new PrGroupLedgerError(
+            "PR_GROUP_EXACT_HEAD_REQUIRED",
+            "conditional merge requires successful provider CI proof bound to the same repository, PR, base, and head",
             { group_id: groupId, attempt_id: attemptId, head_sha: headSha },
           );
         }
@@ -1406,12 +1594,17 @@ export class PrGroupLedger {
           head_sha: headSha,
           receipt_key: conditionalMergeReceiptKey!,
         });
-        if (!mergeReceipt ||
-            mergeReceipt.actor_id !== actorId ||
-            mergeReceipt.actor_run_id !== actorRunId) {
+        if (!mergeReceipt) {
           throw new PrGroupLedgerError(
             "PR_GROUP_MERGE_RECEIPT_REQUIRED",
             "merge outcome requires the bound exact-head conditional receipt from the same actor/run",
+            { group_id: groupId, attempt_id: attemptId, head_sha: headSha },
+          );
+        }
+        if (mergeReceipt.actor_id !== actorId || mergeReceipt.actor_run_id !== actorRunId) {
+          throw new PrGroupLedgerError(
+            "PR_GROUP_OPERATOR_SEPARATION_REQUIRED",
+            "merge outcome must be emitted by the exact conditional-merge operator and run",
             { group_id: groupId, attempt_id: attemptId, head_sha: headSha },
           );
         }
@@ -1497,6 +1690,30 @@ export class PrGroupLedger {
               "merged cleanup requires the exact bound review, conditional merge, and merge receipts",
             );
           }
+        } else if (group.terminal_outcome === "no_go") {
+          const review = group.terminal_head_sha === null
+            ? null
+            : await tx.findEvent(groupId, {
+              event_type: "review_receipt",
+              head_sha: group.terminal_head_sha,
+              receipt_key: cleanupProof.review_receipt_key ?? undefined,
+            });
+          if (!cleanupProof.review_receipt_key ||
+              cleanupProof.conditional_merge_receipt_key !== null ||
+              cleanupProof.merge_receipt_key !== null ||
+              cleanupProof.provider_head_sha !== group.terminal_head_sha ||
+              !review ||
+              review.outcome === "approved") {
+            throw new PrGroupLedgerError(
+              "PR_GROUP_CLEANUP_BLOCKED",
+              "NO-GO cleanup requires the exact non-approving review receipt and terminal head",
+            );
+          }
+        } else {
+          throw new PrGroupLedgerError(
+            "PR_GROUP_CLEANUP_BLOCKED",
+            "cancelled and failed cleanup requires a future durable unique-work consumption proof",
+          );
         }
       }
 
@@ -1506,7 +1723,7 @@ export class PrGroupLedger {
       const state = reviewExhausted ? "no_go" : stateForEvent(eventType, outcome);
       const event: PrGroupEventRecord = {
         schema_version: PR_GROUP_LEDGER_SCHEMA_VERSION,
-        id: deterministicEventId(groupId, idempotencyKey),
+        id: deterministicPrGroupEventId(groupId, idempotencyKey),
         group_id: groupId,
         attempt_id: attemptId,
         writer_generation: writerGeneration,
@@ -1528,6 +1745,7 @@ export class PrGroupLedger {
         expected_reviewer_id: expectedReviewerId,
         expected_reviewer_run_id: expectedReviewerRunId,
         repair_cycle: repairCycle,
+        ci_proof: ciProof,
         cleanup_proof: cleanupProof,
         metadata,
         payload_hash: payloadHash,

@@ -47,6 +47,8 @@ describe("/v1 task-list cloud parity", () => {
       writer_generation: "generation-1",
       worktree: "/tmp/pr-group",
       branch: "feat/pr-group",
+      pr_number: 78,
+      base_sha: "a".repeat(40),
       admitted_at: "2026-07-23T10:00:00.000Z",
     });
     expect(admitted?.status).toBe(201);
