@@ -75,7 +75,7 @@ describe("agent identity projection contract", () => {
       foundation_pull_request: 14,
       foundation_contract: "hasna.identities.agent-identity/v1",
       foundation_version: 1,
-      foundation_commit: "557fc2228722b7505071cd08d2109906664637ee",
+      foundation_commit: "14d83e3e45df5748944a871a07c4aacece893169",
       foundation_fixture_id: "hasna.identities.agent-identity/v1/conformance/1",
       foundation_fixture_source_path: "docs/fixtures/agent-identity-v1.conformance.json",
       foundation_fixture_local_path: "src/db/fixtures/agent-identity-v1.conformance.json",
@@ -88,6 +88,16 @@ describe("agent identity projection contract", () => {
     expect(CANARY_IDENTITY_READ_PREFERENCE).toBe("canonical_first");
     expect(ROLLBACK_IDENTITY_READ_PREFERENCE).toBe("legacy_first");
     expect(resolveAgentIdentity({}, {}, db)).toEqual({
+      identity_id: null,
+      local_agent_id: null,
+      resolved_by: "none",
+      trust: "denied",
+    });
+    expect(resolveAgentIdentity(
+      { identity_id: "identity-unknown" },
+      { read_preference: "canonical_only" },
+      db,
+    )).toEqual({
       identity_id: null,
       local_agent_id: null,
       resolved_by: "none",
@@ -681,5 +691,23 @@ describe("agent identity projection contract", () => {
       [GITHUB_ACTOR_SOURCE.source_record_id],
     )).toThrow("IDENTITY_MAPPING_HISTORY_IMMUTABLE");
     expect(getAgent(agent.id, db)?.identity_id).toBe("identity-fixed");
+  });
+
+  it("rejects deletion of append-only identity mapping history below the application layer", () => {
+    const agent = registerAgent({ name: "boethius" }, db);
+    if ("conflict" in agent) throw new Error(agent.message);
+    const mapping = bindAuthoritativeIdentityMapping({
+      ...GITHUB_ACTOR_SOURCE,
+      local_agent_id: agent.id,
+      identity_id: "identity-boethius",
+    }, db);
+
+    expect(() => db.run(
+      "DELETE FROM agent_identity_source_mappings WHERE id = ?",
+      [mapping.id],
+    )).toThrow(/IDENTITY_MAPPING_HISTORY_IMMUTABLE/);
+    expect(db.query(
+      "SELECT id FROM agent_identity_source_mappings WHERE id = ?",
+    ).get(mapping.id)).toEqual({ id: mapping.id });
   });
 });

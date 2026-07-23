@@ -1,8 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { getDatabase, closeDatabase, resetDatabase } from "./database.js";
 import { registerAgent, isAgentConflict, releaseAgent, autoReleaseStaleAgents, getAgent, getAgentByName, listAgents, updateAgentActivity, updateAgent, deleteAgent, archiveAgent, unarchiveAgent, normalizeGeneratedAgentNames, InvalidAgentNameError } from "./agents.js";
 import { PREFERRED_AGENT_NAMES, suggestAgentNames } from "./agent-names.js";
-import { IdentityAliasAmbiguousError, listAgentAliases, resolveAgentIdentity } from "./identity-mapping.js";
+import { IdentityAliasAmbiguousError, listAgentAliases } from "./identity-mapping.js";
 import { createTask, getNextTask, listTasks } from "./tasks.js";
 import { getAgentMetrics } from "./agent-metrics.js";
 
@@ -68,6 +72,56 @@ describe("registerAgent", () => {
     expect(() => registerAgent({ name: "valeria-29" })).toThrow(/numbered suffix/);
     expect(() => registerAgent({ name: "two words" })).toThrow(/single word/);
     expect(() => registerAgent({ name: "busy-agent" })).toThrow(/one word/);
+  });
+
+  it("holds an immediate write fence across canonical lookup and insert", () => {
+    closeDatabase();
+    resetDatabase();
+    const root = mkdtempSync(join(tmpdir(), "todos-agent-register-race-"));
+    const path = join(root, "todos.db");
+    const primary = getDatabase(path);
+    const contender = new Database(path);
+    contender.run("PRAGMA busy_timeout = 1");
+    contender.run("PRAGMA foreign_keys = ON");
+    let contenderBlocked = false;
+
+    try {
+      const input = {
+        name: "quintilian",
+        identity_id: "identity-quintilian",
+        get description(): string {
+          try {
+            const createdAt = new Date().toISOString();
+            contender.run(
+              "INSERT INTO agents (id, name, identity_id, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?)",
+              ["racer001", "rivalname", "identity-quintilian", createdAt, createdAt],
+            );
+          } catch (error) {
+            if (error instanceof Error && error.message.includes("database is locked")) {
+              contenderBlocked = true;
+            } else {
+              throw error;
+            }
+          }
+          return "registration race";
+        },
+      };
+
+      const registered = registerAgent(input, primary);
+      if ("conflict" in registered) throw new Error(registered.message);
+
+      expect(contenderBlocked).toBe(true);
+      expect(primary.query(
+        "SELECT id FROM agents WHERE identity_id = ? ORDER BY id",
+      ).all("identity-quintilian")).toEqual([{ id: registered.id }]);
+    } finally {
+      contender.close();
+      closeDatabase();
+      resetDatabase();
+      rmSync(root, { recursive: true, force: true });
+      process.env["TODOS_DB_PATH"] = ":memory:";
+      getDatabase();
+    }
   });
 });
 
@@ -274,7 +328,7 @@ describe("normalizeGeneratedAgentNames", () => {
 
     expect(getAgent(agentId, db)?.name).toBe(historicalName);
     expect(db.query("SELECT * FROM agents WHERE id = ?").get(agentId)).toEqual(agentBefore);
-    expect(changesAfter - changesBefore).toBe(1);
+    expect(changesAfter).toBe(changesBefore);
     expect(listTasks({ assigned_to: historicalName }, db).map((task) => task.id)).toContain(assigned.id);
     expect(getNextTask(historicalName, undefined, db)?.id).toBe(assigned.id);
     expect(getAgentMetrics(historicalName, {}, db)?.tasks_completed).toBe(1);
@@ -282,7 +336,7 @@ describe("normalizeGeneratedAgentNames", () => {
     expect(db.query("SELECT agent_id FROM task_comments WHERE id = ?").get("legacyc1")).toEqual({ agent_id: historicalName });
   });
 
-  it("should retain generated labels and record only quarantined replacement candidates", () => {
+  it("should retain generated labels without persisting replacement candidates", () => {
     const db = getDatabase();
     const timestamp = new Date().toISOString();
     db.run(
@@ -318,19 +372,7 @@ describe("normalizeGeneratedAgentNames", () => {
       { id: "bad00002", name: "valeria-29" },
       { id: "bad00003", name: "busy-agent" },
     ]);
-    for (const item of planned) {
-      expect(listAgentAliases(item.id, db)).toContainEqual(expect.objectContaining({
-        label: item.new_name,
-        alias_kind: "candidate",
-        status: "quarantined",
-      }));
-      expect(resolveAgentIdentity({ alias: item.new_name }, {}, db)).toEqual({
-        identity_id: null,
-        local_agent_id: null,
-        resolved_by: "none",
-        trust: "denied",
-      });
-    }
+    expect(db.query("SELECT * FROM agent_identity_aliases").all()).toEqual([]);
   });
 
   it("should use distinct fallback names when the preferred pool is exhausted", () => {
@@ -353,14 +395,10 @@ describe("normalizeGeneratedAgentNames", () => {
     expect(planned[0]!.new_name).toMatch(/^[a-z]+$/);
     expect(PREFERRED_AGENT_NAMES).not.toContain(planned[0]!.new_name as any);
     expect(getAgent("bad99999", db)?.name).toBe("agent-1");
-    expect(listAgentAliases("bad99999", db)).toContainEqual(expect.objectContaining({
-      label: planned[0]!.new_name,
-      alias_kind: "candidate",
-      status: "quarantined",
-    }));
+    expect(listAgentAliases("bad99999", db)).toEqual([]);
   });
 
-  it("should reuse the same deterministic candidate without appending duplicates", () => {
+  it("should reuse the same deterministic candidate without writing state", () => {
     const db = getDatabase();
     const timestamp = new Date().toISOString();
     db.run(
@@ -373,12 +411,7 @@ describe("normalizeGeneratedAgentNames", () => {
 
     expect(second).toEqual(first);
     expect(getAgent("bad00004", db)?.name).toBe("agent-2");
-    expect(listAgentAliases("bad00004", db)).toHaveLength(1);
-    expect(listAgentAliases("bad00004", db)[0]).toEqual(expect.objectContaining({
-      label: first[0]!.new_name,
-      alias_kind: "candidate",
-      status: "quarantined",
-    }));
+    expect(listAgentAliases("bad00004", db)).toEqual([]);
   });
 
   it("should not suggest preferred-name suffix variants after exhausting the name pool", () => {

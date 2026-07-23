@@ -41,7 +41,7 @@ export const IDENTITY_PROJECTION_CONTRACT = Object.freeze({
   foundation_pull_request: 14,
   foundation_contract: "hasna.identities.agent-identity/v1",
   foundation_version: 1,
-  foundation_commit: "557fc2228722b7505071cd08d2109906664637ee",
+  foundation_commit: "14d83e3e45df5748944a871a07c4aacece893169",
   foundation_fixture_id: "hasna.identities.agent-identity/v1/conformance/1",
   foundation_fixture_source_path: "docs/fixtures/agent-identity-v1.conformance.json",
   foundation_fixture_local_path: "src/db/fixtures/agent-identity-v1.conformance.json",
@@ -229,6 +229,13 @@ export function ensureAgentIdentitySchema(db: Database): void {
       CREATE TRIGGER trg_agent_identity_mapping_history_immutable
       BEFORE UPDATE OF local_agent_id, observed_label, evidence, mapping_basis, status, revision, created_at
         ON agent_identity_source_mappings
+      BEGIN
+        SELECT RAISE(ABORT, 'IDENTITY_MAPPING_HISTORY_IMMUTABLE');
+      END;
+
+      DROP TRIGGER IF EXISTS trg_agent_identity_mapping_history_append_only;
+      CREATE TRIGGER trg_agent_identity_mapping_history_append_only
+      BEFORE DELETE ON agent_identity_source_mappings
       BEGIN
         SELECT RAISE(ABORT, 'IDENTITY_MAPPING_HISTORY_IMMUTABLE');
       END;
@@ -623,9 +630,10 @@ function resolveCanonical(input: AgentIdentityResolutionInput, db: Database): Ag
     if (rows.length > 1) {
       throw new IdentityAliasAmbiguousError(identityId, rows.map((row) => row.id));
     }
+    if (rows.length === 0) return null;
     return {
       identity_id: identityId,
-      local_agent_id: rows[0]?.id ?? null,
+      local_agent_id: rows[0]!.id,
       resolved_by: "identity_id",
       trust: "authoritative",
     };

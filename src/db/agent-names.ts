@@ -1,6 +1,5 @@
 import type { Database } from "bun:sqlite";
 import type { Agent } from "../types/index.js";
-import { recordAgentAliasCandidate } from "./identity-mapping.js";
 
 export class InvalidAgentNameError extends Error {
   readonly suggestions: string[];
@@ -312,10 +311,9 @@ export interface AgentNameNormalization {
 /**
  * Plan safe replacement labels without changing the local actor label.
  *
- * Existing task, comment, lock, queue, and metrics consumers are not yet
- * alias-aware. Proposed labels are therefore stored only as quarantined alias
- * candidates. The current agents.name and every historical reference remain
- * unchanged and discoverable until a separate consumer rollout is complete.
+ * The current agents.name and every historical reference remain unchanged and
+ * discoverable. This planner is byte-for-byte read-only; persisting a
+ * quarantined candidate requires a separate explicit reconciliation action.
  */
 export function normalizeGeneratedAgentNames(db: Database): AgentNameNormalization[] {
   const rows = db.query("SELECT * FROM agents ORDER BY created_at, id").all() as Agent[];
@@ -344,15 +342,6 @@ export function normalizeGeneratedAgentNames(db: Database): AgentNameNormalizati
       name_updates: 0,
       reference_updates: 0,
     });
-  }
-
-  if (planned.length > 0) {
-    const quarantineCandidates = db.transaction(() => {
-      for (const candidate of planned) {
-        recordAgentAliasCandidate(candidate.id, candidate.new_name, db);
-      }
-    });
-    quarantineCandidates.immediate();
   }
 
   return planned;

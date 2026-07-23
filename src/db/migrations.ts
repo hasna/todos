@@ -1310,6 +1310,12 @@ export const MIGRATIONS = [
     SELECT RAISE(ABORT, 'IDENTITY_MAPPING_HISTORY_IMMUTABLE');
   END;
 
+  CREATE TRIGGER IF NOT EXISTS trg_agent_identity_mapping_history_append_only
+  BEFORE DELETE ON agent_identity_source_mappings
+  BEGIN
+    SELECT RAISE(ABORT, 'IDENTITY_MAPPING_HISTORY_IMMUTABLE');
+  END;
+
   INSERT OR IGNORE INTO _migrations (id) VALUES (65);
   `,
 ];

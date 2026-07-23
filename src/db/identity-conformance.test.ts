@@ -67,7 +67,7 @@ describe("hasna/identities agent identity V1 conformance", () => {
     expect(IDENTITY_PROJECTION_CONTRACT).toMatchObject({
       foundation_repository: "hasna/identities",
       foundation_pull_request: 14,
-      foundation_commit: "557fc2228722b7505071cd08d2109906664637ee",
+      foundation_commit: "14d83e3e45df5748944a871a07c4aacece893169",
       foundation_contract: fixture.contract,
       foundation_version: fixture.version,
       foundation_fixture_id: fixture.fixture_id,

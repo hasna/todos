@@ -87,6 +87,14 @@ function rowToAgent(row: AgentRow): Agent {
  */
 export function registerAgent(input: RegisterAgentInput, db?: Database): Agent | AgentConflictError {
   const d = db || getDatabase();
+  const register = d.transaction(() => registerAgentInCurrentTransaction(input, d));
+  return register.immediate();
+}
+
+function registerAgentInCurrentTransaction(
+  input: RegisterAgentInput,
+  d: Database,
+): Agent | AgentConflictError {
   const machineId = currentStorageMachineId(d);
   const identityId = input.identity_id === undefined ? null : input.identity_id.trim();
   if (input.identity_id !== undefined && !identityId) {
