@@ -1551,7 +1551,7 @@ export function registerTaskCommands(program: Command) {
   // bulk
   program
     .command("bulk <action> <ids...>")
-    .description("Bulk operation on multiple tasks (done, start, delete, plan)")
+    .description("Bulk operation on multiple tasks (done, start, delete, plan/move-plan)")
     .option("--plan <id>", "Plan ID for the plan/move-plan action")
     .option("--clear-plan", "Remove plan assignment for the plan/move-plan action")
     .action(async (action: string, ids: string[], opts: { plan?: string; clearPlan?: boolean }) => {
@@ -1564,7 +1564,7 @@ export function registerTaskCommands(program: Command) {
       }
       const knownActions = new Set(["done", "complete", "start", "delete", "plan", "move-plan"]);
       if (!knownActions.has(action)) {
-        handleError(new Error(`Unknown action: ${action}. Use: done, start, delete, plan`));
+        handleError(new Error(`Unknown action: ${action}. Use: done, start, delete, plan (alias: move-plan)`));
       }
 
       // self_hosted cloud routing: run each op against the SHARED dataset. The local
@@ -1653,7 +1653,7 @@ export function registerTaskCommands(program: Command) {
             updateTask(resolvedId, { version: current.version, plan_id: planId });
             results.push({ id: resolvedId, success: true });
           } else {
-            handleError(new Error(`Unknown action: ${action}. Use: done, start, delete, plan`));
+            handleError(new Error(`Unknown action: ${action}. Use: done, start, delete, plan (alias: move-plan)`));
           }
         } catch (e) {
           results.push({ id: rawId, success: false, error: e instanceof Error ? e.message : String(e) });
