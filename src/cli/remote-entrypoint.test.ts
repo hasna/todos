@@ -1135,6 +1135,9 @@ describe("remote CLI entrypoint authority boundary", () => {
       );
       expect(unknownPlan.exitCode).toBe(1);
       expect(unknownPlan.stderr).not.toContain("REMOTE_COMMAND_UNSUPPORTED");
+      expect(unknownPlan.stderr).toContain("plan-that-does-not-exist");
+      // Fail closed: an unresolvable plan must not have moved (or detached) the task.
+      expect(JSON.parse(await runRemoteOk(["--json", "show", bulkTaskId])).plan_id).toBe(PLAN_ID);
       expectNoLocalDatabase(root, localDbPath);
       await runRemoteOk(["--json", "delete", bulkTaskId]);
 
