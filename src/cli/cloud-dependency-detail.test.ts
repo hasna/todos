@@ -200,6 +200,43 @@ describe("cloud task detail dependencies (issue #58)", () => {
     }
   });
 
+  test("more edges than the hydration concurrency window are each fetched exactly once", async () => {
+    // Guards the bounded-concurrency worker loop: every edge must be visited
+    // (none dropped past the window) and duplicate edge rows must collapse to a
+    // single task lookup.
+    const requests: string[] = [];
+    const upstreamIds = Array.from({ length: 14 }, (_, index) => `eeeeeeee-0000-4000-8000-${String(index).padStart(12, "0")}`);
+    const known: Record<string, Record<string, unknown>> = {};
+    for (const [index, id] of upstreamIds.entries()) known[id] = taskFixture(id, { title: `Upstream ${index}` });
+    known[DOWNSTREAM_ID] = taskFixture(DOWNSTREAM_ID, { title: "Downstream consumer" });
+    const server = startServer({
+      requests,
+      known,
+      edges: {
+        // The last row repeats an earlier edge — the server may return duplicates.
+        dependencies: [...upstreamIds, upstreamIds[0]!].map((depends_on) => ({ task_id: TASK_ID, depends_on })),
+        blocked_by: [{ task_id: DOWNSTREAM_ID, depends_on: TASK_ID }],
+      },
+    });
+    const root = mkdtempSync(join(tmpdir(), "todos-cloud-deps-concurrency-"));
+    tempRoots.push(root);
+    try {
+      const shown = await runCli(["--json", "show", TASK_ID], root, `http://127.0.0.1:${server.port}`);
+      expect(shown.stderr).toBe("");
+      expect(shown.exitCode).toBe(0);
+      const task = JSON.parse(shown.stdout);
+      expect(task.dependencies.map((d: { id: string }) => d.id)).toEqual(upstreamIds);
+      expect(task.dependencies.every((d: { title: string }) => d.title.startsWith("Upstream "))).toBe(true);
+      expect(task.blocked_by.map((d: { id: string }) => d.id)).toEqual([DOWNSTREAM_ID]);
+      const lookups = requests.filter((entry) => /^GET \/v1\/tasks\/[^/]+$/.test(entry));
+      // The task itself + 14 upstream + 1 downstream, no repeats.
+      expect(lookups).toHaveLength(16);
+      expect(new Set(lookups).size).toBe(16);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("an edge pointing at a missing task keeps the valid relations and surfaces a placeholder", async () => {
     const server = startServer({
       edges: {
