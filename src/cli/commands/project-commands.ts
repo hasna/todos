@@ -11,7 +11,7 @@ import {
   updateProject,
 } from "../../db/projects.js";
 import { addComment } from "../../db/comments.js";
-import { getTodosCloudClient, cloudAddComment, cloudCreateProject, cloudListProjects, cloudResolveProject, cloudUpdateProject, cloudAddDependency, cloudRemoveDependency, cloudGetDependencies, cloudRenameProject } from "../cloud-router.js";
+import { getTodosCloudClient, cloudAddComment, cloudCreateProject, cloudListProjects, cloudListTasks, cloudResolveProject, cloudUpdateProject, cloudAddDependency, cloudRemoveDependency, cloudGetDependencies, cloudRenameProject } from "../cloud-router.js";
 import { searchTasks } from "../../lib/search.js";
 import {
   deleteSearchView,
@@ -209,8 +209,7 @@ export function registerProjectCommands(program: Command) {
       if (opts.pct !== undefined) {
         const pct = parseInt(opts.pct, 10);
         if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
-          console.error(chalk.red("--pct must be a number between 0 and 100"));
-          process.exit(1);
+          handleError(new Error("--pct must be a number between 0 and 100"));
         }
         content = `[progress ${pct}%] ${text}`;
         progressPct = pct;
@@ -269,10 +268,19 @@ export function registerProjectCommands(program: Command) {
     .option("--save-as <name>", "Save this search as a named view")
     .option("--description <text>", "Saved view description")
     .option("--all-projects", "Do not auto-scope the search to the current project")
-    .action((query: string, opts) => {
+    .action(async (query: string, opts) => {
       const globalOpts = program.opts();
       try {
-        const projectId = opts.allProjects ? undefined : autoProject(globalOpts);
+        // self_hosted cloud routing: the local FTS5 index (searchTasks) only sees
+        // the local SQLite file, which is empty on a cloud/self-hosted deployment.
+        // Route task search through the shared `/v1/tasks?q=` API so it runs the
+        // Postgres tsvector/trigram path instead of returning nothing.
+        const cloud = getTodosCloudClient();
+        const projectId = opts.allProjects
+          ? undefined
+          : cloud
+            ? undefined
+            : autoProject(globalOpts);
         const scope = normalizeScope(opts.scope) as SavedSearchScope;
         const searchOpts = buildSearchFilters(query, opts, projectId);
         if (opts.saveAs) {
@@ -284,6 +292,38 @@ export function registerProjectCommands(program: Command) {
           });
           output(view, Boolean(globalOpts.json));
           if (!globalOpts.json) console.log(chalk.green(`Saved view ${view.name}.`));
+          return;
+        }
+        if (cloud) {
+          if (scope !== "tasks") {
+            console.error(chalk.red(`Cross-entity search scope "${scope}" is not supported against a self-hosted authority; only --scope tasks is available.`));
+            process.exit(1);
+          }
+          const tasks = await cloudListTasks(cloud, {
+            query,
+            ...(searchOpts.project_id ? { project_id: searchOpts.project_id } : {}),
+            ...(searchOpts.status ? { status: searchOpts.status as never } : {}),
+            ...(searchOpts.priority ? { priority: searchOpts.priority as never } : {}),
+            ...(searchOpts.assigned_to ? { assigned_to: searchOpts.assigned_to } : {}),
+            ...(searchOpts.agent_id ? { agent_id: searchOpts.agent_id } : {}),
+            ...(searchOpts.task_list_id ? { task_list_id: searchOpts.task_list_id } : {}),
+            ...(searchOpts.plan_id ? { plan_id: searchOpts.plan_id } : {}),
+            ...(searchOpts.tags?.length ? { tags: searchOpts.tags } : {}),
+            ...(typeof searchOpts.limit === "number" ? { limit: searchOpts.limit } : {}),
+          });
+          const outputTasks = redactBroadTasks(tasks);
+          if (globalOpts.json) {
+            output(outputTasks, true);
+            return;
+          }
+          if (outputTasks.length === 0) {
+            console.log(chalk.dim(`No tasks matching "${query}".`));
+            return;
+          }
+          console.log(chalk.bold(`${outputTasks.length} result(s) for "${query}":\n`));
+          for (const t of outputTasks) {
+            console.log(formatTaskLine(t));
+          }
           return;
         }
         if (scope !== "tasks") {
@@ -490,8 +530,7 @@ export function registerProjectCommands(program: Command) {
         try {
           addDependency(resolvedId, depId);
         } catch (e) {
-          console.error(chalk.red(e instanceof Error ? e.message : String(e)));
-          process.exit(1);
+          handleError(new Error(e instanceof Error ? e.message : String(e)));
         }
         if (globalOpts.json) {
           output({ task_id: resolvedId, depends_on: depId }, true);
@@ -530,8 +569,7 @@ export function registerProjectCommands(program: Command) {
         // Show dependencies
         const task = getTaskWithRelations(resolvedId);
         if (!task) {
-          console.error(chalk.red("Task not found."));
-          process.exit(1);
+          handleError(new Error("Task not found."));
         }
 
         if (globalOpts.json) {
@@ -704,8 +742,7 @@ export function registerProjectCommands(program: Command) {
         const globalOpts = program.opts();
         const project = opts.project ? resolveExplicitProject(opts.project) : autoDetectProject(globalOpts);
         if (!project) {
-          console.error(chalk.red("Project not found: provide --project or run inside a registered project"));
-          process.exit(1);
+          handleError(new Error("Project not found: provide --project or run inside a registered project"));
         }
 
         const { createTodosProjectPanel } = await import("../../lib/project-panel.js");
@@ -749,8 +786,7 @@ export function registerProjectCommands(program: Command) {
             resolvedId = bySlug?.id ?? null;
           }
           if (!resolvedId) {
-            console.error(chalk.red(`Project not found: ${idOrSlug}`));
-            process.exit(1);
+            handleError(new Error(`Project not found: ${idOrSlug}`));
           }
           result = renameProject(resolvedId, { name: opts.name, new_slug: newSlug });
         }
@@ -763,8 +799,7 @@ export function registerProjectCommands(program: Command) {
           }
         }
       } catch (e) {
-        console.error(chalk.red(e instanceof Error ? e.message : String(e)));
-        process.exit(1);
+        handleError(new Error(e instanceof Error ? e.message : String(e)));
       }
     });
 
@@ -784,13 +819,12 @@ export function registerProjectCommands(program: Command) {
         const { setMachineLocalPath } = await import("../../db/projects.js");
         const db = getDatabase();
         const resolved = resolvePartialId(db, "projects", projectId);
-        if (!resolved) { console.error(chalk.red(`Project not found: ${projectId}`)); process.exit(1); }
+        if (!resolved) { handleError(new Error(`Project not found: ${projectId}`)); }
         const entry = setMachineLocalPath(resolved, resolve(projectPath));
         if (useJson) { output(entry, true); }
         else { console.log(chalk.green(`Local path set: ${entry.path} (machine: ${entry.machine_id.slice(0, 8)})`)); }
       } catch (e) {
-        console.error(chalk.red(e instanceof Error ? e.message : String(e)));
-        process.exit(1);
+        handleError(new Error(e instanceof Error ? e.message : String(e)));
       }
     });
 
@@ -805,7 +839,7 @@ export function registerProjectCommands(program: Command) {
         const { listMachineLocalPaths } = await import("../../db/projects.js");
         const db = getDatabase();
         const resolved = resolvePartialId(db, "projects", projectId);
-        if (!resolved) { console.error(chalk.red(`Project not found: ${projectId}`)); process.exit(1); }
+        if (!resolved) { handleError(new Error(`Project not found: ${projectId}`)); }
         const paths = listMachineLocalPaths(resolved);
         if (useJson) { output(paths, true); return; }
         if (paths.length === 0) { console.log(chalk.dim("No machine path overrides.")); return; }
@@ -813,8 +847,7 @@ export function registerProjectCommands(program: Command) {
           console.log(`${chalk.dim(p.machine_id.slice(0, 8))} ${p.path}  ${chalk.dim(p.updated_at)}`);
         }
       } catch (e) {
-        console.error(chalk.red(e instanceof Error ? e.message : String(e)));
-        process.exit(1);
+        handleError(new Error(e instanceof Error ? e.message : String(e)));
       }
     });
 
@@ -827,13 +860,12 @@ export function registerProjectCommands(program: Command) {
         const { removeMachineLocalPath } = await import("../../db/projects.js");
         const db = getDatabase();
         const resolved = resolvePartialId(db, "projects", projectId);
-        if (!resolved) { console.error(chalk.red(`Project not found: ${projectId}`)); process.exit(1); }
+        if (!resolved) { handleError(new Error(`Project not found: ${projectId}`)); }
         const removed = removeMachineLocalPath(resolved, opts.machine);
         if (removed) { console.log(chalk.green("Machine path override removed.")); }
         else { console.log(chalk.dim("No override found to remove.")); }
       } catch (e) {
-        console.error(chalk.red(e instanceof Error ? e.message : String(e)));
-        process.exit(1);
+        handleError(new Error(e instanceof Error ? e.message : String(e)));
       }
     });
 
@@ -977,7 +1009,7 @@ export function registerProjectCommands(program: Command) {
     .option("-o, --output <path>", "Write export output to a file")
     .option("--encrypt", "Encrypt bridge exports with a local encryption profile")
     .option("--encryption-profile <name>", "Encryption profile name", "default")
-    .option("--allow-plaintext-sensitive", "Suppress plaintext bridge export warning")
+    .option("--allow-plaintext-sensitive", "Deprecated; bridge exports are redacted unless --encrypt is used")
     .action(async (opts) => {
       const { listTasks } = await import("../../db/tasks.js");
       const globalOpts = program.opts();
@@ -995,7 +1027,10 @@ export function registerProjectCommands(program: Command) {
         const { createLocalBridgeBundle } = await import("../../lib/local-bridge.js");
         const { createEncryptedBridgeBundle } = await import("../../lib/local-encryption.js");
         const { emitLocalEventHooksQuiet } = await import("../../lib/event-hooks.js");
-        const bundle = createLocalBridgeBundle({ project_id: projectId ?? undefined });
+        const bundle = createLocalBridgeBundle({
+          project_id: projectId ?? undefined,
+          redaction: opts.encrypt ? "unsafe_plaintext" : "redacted",
+        });
         const exported = opts.encrypt
           ? createEncryptedBridgeBundle(bundle, { profile: opts.encryptionProfile })
           : bundle;
@@ -1003,7 +1038,7 @@ export function registerProjectCommands(program: Command) {
         await writeOutput(json);
         emitLocalEventHooksQuiet({ type: "export.finished", payload: { format: "bridge", encrypted: Boolean(opts.encrypt), project_id: projectId, output: opts.output ? resolve(opts.output) : null, stats: bundle.stats } });
         if (!opts.encrypt && !opts.allowPlaintextSensitive) {
-          console.error(chalk.yellow("Warning: bridge exports are plaintext JSON. Use --encrypt for sensitive metadata, evidence, and artifact bundles."));
+          console.error(chalk.dim("Bridge export redacted sensitive fields. Use --encrypt for an encrypted local bundle when a lossless legacy snapshot is required."));
         }
         if (opts.output && !globalOpts.json) {
           console.log(chalk.green(`${opts.encrypt ? "Encrypted bridge export" : "Bridge export"} written to ${resolve(opts.output)}`));
@@ -1133,8 +1168,7 @@ export function registerProjectCommands(program: Command) {
         const agent = (opts.agent as string | undefined) || "claude";
         const taskListId = resolveTaskListForAgent(agent, opts.taskList, project?.task_list_id);
         if (!taskListId) {
-          console.error(chalk.red(`Could not detect task list ID for ${agent}. Use --task-list <id> or set appropriate env vars.`));
-          process.exit(1);
+          handleError(new Error(`Could not detect task list ID for ${agent}. Use --task-list <id> or set appropriate env vars.`));
         }
         result = syncWithAgent(agent, taskListId, projectId, direction, { prefer });
       }
@@ -1178,8 +1212,7 @@ function resolveTaskListId(partialId: string): string {
   const db = getDatabase();
   const id = resolvePartialId(db, "task_lists", partialId);
   if (!id) {
-    console.error(chalk.red(`Could not resolve task list ID: ${partialId}`));
-    process.exit(1);
+    handleError(new Error(`Could not resolve task list ID: ${partialId}`));
   }
   return id;
 }

@@ -12,7 +12,7 @@ export function runMigrations(db: Database): void {
       } catch {
         // Migration was not running in an explicit transaction.
       }
-      if (index + 1 >= 67) strictMigrationFailure = error;
+      if (index + 1 >= 68) strictMigrationFailure = error;
       // Older migrations remain best-effort because ensureSchema repairs them.
     }
   };
@@ -1574,11 +1574,11 @@ export function ensureSchema(db: Database): void {
   if (!hasGlobalReceiptUniqueness) {
     throw new Error("PR-group schema integrity failure: receipt_key is not globally unique");
   }
-  const strictMigration = db.query("SELECT 1 AS ok FROM _migrations WHERE id = 67").get() as {
+  const strictMigration = db.query("SELECT 1 AS ok FROM _migrations WHERE id = 68").get() as {
     ok: number;
   } | null;
   if (strictMigration?.ok !== 1) {
-    throw new Error("PR-group schema integrity failure: migration 67 is not recorded");
+    throw new Error("PR-group schema integrity failure: migration 68 is not recorded");
   }
 }
 

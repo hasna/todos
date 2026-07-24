@@ -14,9 +14,9 @@ import {
 } from "../db/task-runs.js";
 import { artifactStorePath } from "../lib/artifact-store.js";
 import {
-  CANONICAL_TODOS_RDS_CLUSTER,
+  CANONICAL_TODOS_RDS_CLUSTER_ENV,
   CANONICAL_TODOS_RDS_DATABASE,
-  CANONICAL_TODOS_RDS_RUNTIME_PATH,
+  CANONICAL_TODOS_RDS_RUNTIME_PATH_ENV,
   STORAGE_TABLES,
   TODOS_STORAGE_ENV,
   TODOS_STORAGE_FALLBACK_ENV,
@@ -126,6 +126,19 @@ describe("storage adapter contracts", () => {
     expectStore(adapter, "templates", ["create", "get", "list", "update", "delete", "getWithTasks"]);
     expectStore(adapter, "audit", ["logTaskChange", "addComment", "getTaskHistory", "getRecentActivity"]);
     expectStore(adapter, "sync", ["getTasksChangedSince", "exportSnapshot", "importSnapshot"]);
+  });
+
+  test("tasks.list/count route a free-text query through FTS on the local adapter", async () => {
+    const adapter = createLocalSqliteTodosStorageAdapter({ db });
+    await adapter.tasks.create({ title: "Fix login authentication bug" });
+    await adapter.tasks.create({ title: "Add dashboard widget" });
+
+    const hits = await adapter.tasks.list({ query: "authentication" });
+    expect(hits.map((t) => t.title)).toEqual(["Fix login authentication bug"]);
+    expect(await adapter.tasks.count({ query: "authentication" })).toBe(1);
+
+    await adapter.tasks.create({ title: "authentication retry path" });
+    expect(await adapter.tasks.list({ query: "authentication", limit: 1 })).toHaveLength(1);
   });
 
   test("delegates core task, project, plan, agent, template, audit, and sync operations", async () => {
@@ -652,17 +665,25 @@ describe("storage adapter contracts", () => {
     expect(getStorageDatabaseUrl(env)).toBe("postgres://todos@rds.example/fallback");
   });
 
-  test("documents the canonical Hasna XYZ RDS target", () => {
-    expect(getCanonicalTodosRdsConfig()).toEqual({
-      cluster: CANONICAL_TODOS_RDS_CLUSTER,
+  test("reads the canonical RDS target from env with no baked-in infra defaults", () => {
+    // No real cluster name or secrets-manager path ships in the package: with the
+    // hosting env vars unset, these fields resolve to null.
+    expect(getCanonicalTodosRdsConfig({})).toEqual({
+      cluster: null,
       database: CANONICAL_TODOS_RDS_DATABASE,
-      runtimeSecretPath: CANONICAL_TODOS_RDS_RUNTIME_PATH,
+      runtimeSecretPath: null,
       primaryEnv: TODOS_STORAGE_ENV.databaseUrl,
       fallbackEnv: TODOS_STORAGE_FALLBACK_ENV.databaseUrl,
     });
-    expect(CANONICAL_TODOS_RDS_CLUSTER).toBe("hasna-xyz-infra-apps-prod-postgres");
     expect(CANONICAL_TODOS_RDS_DATABASE).toBe("todos");
-    expect(CANONICAL_TODOS_RDS_RUNTIME_PATH).toBe("hasna/xyz/opensource/todos/prod/rds");
+
+    // When the private hosting wrapper supplies the identifiers, they pass through.
+    const withEnv = getCanonicalTodosRdsConfig({
+      [CANONICAL_TODOS_RDS_CLUSTER_ENV]: "example-cluster",
+      [CANONICAL_TODOS_RDS_RUNTIME_PATH_ENV]: "example/todos/prod/rds",
+    });
+    expect(withEnv.cluster).toBe("example-cluster");
+    expect(withEnv.runtimeSecretPath).toBe("example/todos/prod/rds");
   });
 
   test("rejects remote mode when no remote adapter or Postgres client is supplied", () => {

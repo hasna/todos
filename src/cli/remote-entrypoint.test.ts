@@ -201,8 +201,6 @@ describe("remote CLI entrypoint authority boundary", () => {
       ["claim", "fixture-agent", "--stale-minutes", "30"],
       ["claim", "fixture-agent", "--steal-stale"],
       ["status", "--agent", "fixture-agent"],
-      ["deps", TASK_FIXTURE_ID, "--graph"],
-      ["deps", TASK_FIXTURE_ID, "--direction=up"],
       ["bulk", "plan", TASK_FIXTURE_ID, "--plan", "fixture-plan"],
       ["bulk", "unknown", TASK_FIXTURE_ID],
       ["projects", "--path-prefix", "/tmp", "--deregister", "fixture"],
@@ -235,6 +233,14 @@ describe("remote CLI entrypoint authority boundary", () => {
       ["approve", TASK_FIXTURE_ID],
       ["bulk", "done", TASK_FIXTURE_ID],
       ["deps", TASK_FIXTURE_ID, "--needs", OTHER_TASK_FIXTURE_ID],
+      // `deps <id>` works remotely, so its presentation-only flags must stay
+      // supported too: `--graph`/`--direction` degrade to the same flat edges
+      // rather than flipping a working command to REMOTE_COMMAND_UNSUPPORTED.
+      ["deps", TASK_FIXTURE_ID],
+      ["deps", TASK_FIXTURE_ID, "--graph"],
+      ["deps", TASK_FIXTURE_ID, "--graph", "--json"],
+      ["deps", TASK_FIXTURE_ID, "--direction=up"],
+      ["deps", TASK_FIXTURE_ID, "--direction", "down"],
       ["link-commit", TASK_FIXTURE_ID, "abc123"],
       ["find-commit", "abc123"],
       ["link-ref", TASK_FIXTURE_ID, "branch/name"],
@@ -242,12 +248,38 @@ describe("remote CLI entrypoint authority boundary", () => {
       ["record-verification", TASK_FIXTURE_ID, "bun test"],
       ["recap"],
       ["standup"],
+      // Dedicated alias mutators must share the same remote capability surface as
+      // their `update --assign`/`update --tags` equivalents (assign-tag-untag bug).
+      ["assign", TASK_FIXTURE_ID, "fixture-agent"],
+      ["tag", TASK_FIXTURE_ID, "fixture-tag"],
+      ["untag", TASK_FIXTURE_ID, "fixture-tag"],
     ]) {
       expect(() => initializeTodosCliAuthority(args, {
         HASNA_TODOS_STORAGE_MODE: "remote",
         HASNA_TODOS_API_URL: "https://authority.invalid",
         HASNA_TODOS_API_KEY: "fixture-remote-key",
       })).not.toThrow();
+    }
+  });
+
+  test("shell-completion generation stays diagnostic in remote mode even with a shell argument", () => {
+    for (const args of [
+      ["completions", "bash"],
+      ["completions", "zsh"],
+      ["completions", "fish"],
+      ["completion", "bash"],
+      ["completion", "zsh"],
+      ["completion", "fish"],
+    ]) {
+      const result = initializeTodosCliAuthority(args, {
+        HASNA_TODOS_STORAGE_MODE: "remote",
+        HASNA_TODOS_API_URL: "https://authority.invalid",
+        HASNA_TODOS_API_KEY: "fixture-remote-key",
+      });
+      expect(result).toEqual({
+        route: "remote-diagnostic",
+        v1_base_url: "https://authority.invalid/v1",
+      });
     }
   });
 
@@ -296,8 +328,6 @@ describe("remote CLI entrypoint authority boundary", () => {
         ["claim", "fixture-agent", "--steal-stale"],
         ["--project", "fixture", "claim", "fixture-agent"],
         ["--agent", "fixture", "status"],
-        ["deps", TASK_FIXTURE_ID, "--graph"],
-        ["deps", TASK_FIXTURE_ID, "--direction", "up"],
         ["bulk", "plan", TASK_FIXTURE_ID, "--plan", "fixture-plan"],
         ["bulk", "unknown", TASK_FIXTURE_ID],
         ["projects", "--deregister", "fixture", "--path-prefix", "/tmp"],
@@ -364,6 +394,46 @@ describe("remote CLI entrypoint authority boundary", () => {
       server.stop(true);
     }
   }, 45_000);
+
+  test("built help and manual advertise only remote-executable commands", async () => {
+    const env = {
+      PATH: process.env.PATH ?? "",
+      BUN_INSTALL: process.env.BUN_INSTALL ?? join(process.env.HOME ?? "/home/hasna", ".bun"),
+      HOME: mkdtempSync(join(tmpdir(), "todos-remote-help-")),
+      LANG: "C.UTF-8",
+      HASNA_TODOS_STORAGE_MODE: "remote",
+      HASNA_TODOS_API_URL: "https://authority.invalid",
+      HASNA_TODOS_API_KEY: "fixture-remote-key",
+    };
+    tempRoots.push(env.HOME);
+
+    const localOnly = [...getTodosCliCommandCapabilityMatrix()]
+      .filter(([, owner]) => owner === "local-only")
+      .map(([command]) => command);
+
+    const manual = await runCli(executable, ["manual", "--json"], env);
+    expect(manual.exitCode).toBe(0);
+    const parsed = JSON.parse(manual.stdout) as {
+      local_only: boolean;
+      examples: string[];
+      commands: { path: string[] }[];
+    };
+    const advertised = parsed.commands.map((entry) => entry.path[0] ?? "");
+    // Regression: no advertised command may be one Stage A rejects at runtime.
+    expect(advertised.filter((name) => localOnly.includes(name))).toEqual([]);
+    for (const name of ["status", "list", "add"]) expect(advertised).toContain(name);
+    for (const name of ["ready", "usage", "burndown", "summary", "verify-providers"]) {
+      expect(advertised).not.toContain(name);
+    }
+    expect(parsed.local_only).toBe(false);
+    expect(parsed.examples.some((example) => example.startsWith("todos ready"))).toBe(false);
+
+    const help = await runCli(executable, ["--help"], env);
+    expect(help.exitCode).toBe(0);
+    expect(help.stdout).not.toMatch(/\bburndown\b/);
+    expect(help.stdout).not.toMatch(/\bverify-providers\b/);
+    expect(help.stdout).toMatch(/\bstatus\b/);
+  });
 
   test("built status command uses /v1 and never opens the local or Postgres adapter", async () => {
     const requests: Array<{ method: string; path: string; authorization: string | null }> = [];
@@ -553,6 +623,78 @@ describe("remote CLI entrypoint authority boundary", () => {
       server.stop(true);
     }
   });
+
+  test("built deps --graph/--direction stay on /v1 and render the same flat edges as base deps", async () => {
+    // Regression: a lone `--graph`/`--direction` flag used to flip a working
+    // `deps <id>` into REMOTE_COMMAND_UNSUPPORTED at Stage A. The recursive graph
+    // is a local-only view, so in remote mode these flags must degrade to the same
+    // flat dependency/blocked-by edges instead of failing closed.
+    const TASK_ID = "44444444-4444-4444-8444-444444444444";
+    const DEP_ID = "55555555-5555-4555-8555-555555555555";
+    const requests: string[] = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url);
+        requests.push(`${request.method} ${url.pathname}`);
+        if (request.headers.get("authorization") !== "Bearer fixture-remote-key") {
+          return Response.json({ error: "fixture auth required" }, { status: 401 });
+        }
+        if (url.pathname === `/v1/tasks/${TASK_ID}/dependencies` && request.method === "GET") {
+          return Response.json({
+            dependencies: [{ task_id: TASK_ID, depends_on: DEP_ID }],
+            blocked_by: [],
+          });
+        }
+        return Response.json({ error: `fixture route missing: ${request.method} ${url.pathname}` }, { status: 404 });
+      },
+    });
+    const root = mkdtempSync(join(tmpdir(), "todos-deps-graph-"));
+    tempRoots.push(root);
+    const cwd = join(root, "cwd");
+    const home = join(root, "home");
+    mkdirSync(cwd);
+    mkdirSync(home);
+    const localDbPath = join(root, "must-not-exist", "todos.db");
+    const env = {
+      PATH: process.env.PATH ?? "",
+      BUN_INSTALL: process.env.BUN_INSTALL ?? join(process.env.HOME ?? "/home/hasna", ".bun"),
+      HOME: home,
+      TMPDIR: root,
+      LANG: "C.UTF-8",
+      TODOS_AUTO_PROJECT: "false",
+      TODOS_DB_PATH: localDbPath,
+      HASNA_TODOS_STORAGE_MODE: "remote",
+      HASNA_TODOS_API_URL: `http://127.0.0.1:${server.port}`,
+      HASNA_TODOS_API_KEY: "fixture-remote-key",
+    };
+    const before = recursiveInventory(cwd);
+    try {
+      const baseJson = { dependencies: [{ task_id: TASK_ID, depends_on: DEP_ID }], blocked_by: [] };
+      for (const args of [
+        ["--json", "deps", TASK_ID],
+        ["--json", "deps", TASK_ID, "--graph"],
+        ["--json", "deps", TASK_ID, "--direction", "up"],
+        ["deps", TASK_ID, "--graph"],
+      ]) {
+        const requestCount = requests.length;
+        const result = await runCli(executable, args, env, cwd);
+        expect({ args, exitCode: result.exitCode, stderr: result.stderr }).toEqual({ args, exitCode: 0, stderr: "" });
+        // Every variant reaches HTTP (no Stage-A rejection, no local fallback).
+        expect(requests[requestCount]).toBe(`GET /v1/tasks/${TASK_ID}/dependencies`);
+        if (args.includes("--json")) {
+          expect(JSON.parse(result.stdout)).toEqual(baseJson);
+        } else {
+          expect(result.stdout).toContain(DEP_ID);
+        }
+        expect(recursiveInventory(cwd)).toEqual(before);
+        expectNoLocalDatabase(home, localDbPath);
+      }
+    } finally {
+      server.stop(true);
+    }
+  }, 45_000);
 
   test("built remote done persists every evidence field and rejects invalid confidence before requests", async () => {
     const TASK_ID = "33333333-3333-4333-8333-333333333333";
@@ -927,6 +1069,9 @@ describe("remote CLI entrypoint authority boundary", () => {
         ["--json", "show", "REMOTE-1"],
         ["--json", "inspect", "REMOTE-1"],
         ["--json", "update", "REMOTE-1", "--title", "Moved task", "--list", LIST_ID, "--plan", PLAN_ID],
+        ["--json", "assign", "REMOTE-1", "fixture-agent"],
+        ["--json", "tag", "REMOTE-1", "urgent"],
+        ["--json", "untag", "REMOTE-1", "urgent"],
         ["--json", "comment", "REMOTE-1", "remote comment"],
         ["--json", "start", "REMOTE-1"],
         ["--json", "done", "REMOTE-1"],

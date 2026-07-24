@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] - 2026-07-24
+
+### Fixed
+- SQLite task search no longer silently degrades or fails on queries containing punctuation. The `shouldUseFts` gate rejected any query with punctuation (e.g. `login: urgent`), falling back to a literal substring LIKE that matched nothing. A real FTS5 query parser now handles punctuation safely: AND-by-default terms, quoted phrases, and prefix matching, with FTS5 operator characters stripped/quoted instead of rejected.
+- Task search is now bounded. `searchTasks` built its SQL with no `LIMIT`, so a broad query scanned/returned the whole table. It now applies a bounded default (1000) and honors an explicit `SearchOptions.limit`.
+
+### Changed
+- SQLite FTS ranking now uses `bm25()` column weighting (title >> description > tags), mirroring the Postgres `ts_rank_cd` A/B/C weights so both backends rank equivalently. The FTS path is unioned with the id/short_id/working_dir/metadata LIKE fallback so identifier/fingerprint/path pastes still resolve, with full-text hits ranked first.
+
+## [0.12.0] - 2026-07-24
+
+### Fixed
+- Postgres full-text search parity (cloud/self-hosted returned nothing). `searchTasks` only ever queried the local SQLite FTS5 index, which is empty on a Postgres deployment. Task search now runs through the storage abstraction (`store.tasks.list({ query })`) so cloud/self-hosted executes a real Postgres query.
+
+### Added
+- `migrations/0006_task_fulltext_search.sql`: a weighted (`title`>`description`>`tags`) `tsvector` generated column on `todos_sync_records`, a GIN index for ranked full-text search, and a `pg_trgm` trigram GIN index for typo/fuzzy matching, all diacritics-insensitive via an immutable `unaccent` wrapper. Idempotent with automatic backfill; mirrored into `postgresTodosSyncSchemaSql` so fresh cloud bootstraps get it too.
+- `TaskFilter.query` full-text field, honored by BOTH storage adapters so `GET /v1/tasks?q=` searches whether the server is Postgres- or SQLite-backed. The Postgres adapter emits a `websearch_to_tsquery` predicate (AND-by-default, quoted phrases, punctuation-tolerant) with a single-term `pg_trgm` word-similarity fuzzy fallback, ranked by `ts_rank_cd`; the local SQLite adapter routes the query through the FTS5 `searchTasks` path and applies the remaining filters. Exposed over `GET /v1/tasks?q=`; the `todos search` CLI routes through it under a self-hosted authority.
+
+## [0.11.96] - 2026-07-24
+
+### Security
+- Remove internal production-infrastructure identifiers from the published open-source package. The managed database cluster name and the AWS Secrets Manager runtime path are no longer hardcoded in `src/storage/config.ts`; they are now supplied at runtime by the private hosting wrapper via `HASNA_TODOS_RDS_CLUSTER` and `HASNA_TODOS_RDS_RUNTIME_PATH`, and resolve to `null` when unset (no baked-in defaults).
+- Scrub the internal cloud domain (`*.hasna.xyz`) from source comments, the `union-backfill` script default endpoint, and test fixtures; compose the private billing host in the headless outbound-boundary allowlist from parts so it is not shipped as a plaintext literal (the outbound guard still blocks it).
+- Replace the real fleet machine identifier and private Tailscale/LAN addresses in the README machine-topology example with neutral placeholders.
+
+### Changed
+- **Breaking (public API):** `getCanonicalTodosRdsConfig()` now accepts an optional `env` argument and returns `cluster` / `runtimeSecretPath` as `string | null`. The exported constants `CANONICAL_TODOS_RDS_CLUSTER` and `CANONICAL_TODOS_RDS_RUNTIME_PATH` are replaced by `CANONICAL_TODOS_RDS_CLUSTER_ENV` and `CANONICAL_TODOS_RDS_RUNTIME_PATH_ENV`.
+
 ## [0.11.92] - 2026-07-18
 
 ### Fixed

@@ -1395,7 +1395,7 @@ describe("authoritative PR-group ledger", () => {
     );
   });
 
-  test("migration 66 backfills and safely reopens rejected-head SQLite identity", async () => {
+  test("migration 67 backfills and safely reopens rejected-head SQLite identity", async () => {
     const upgradeDb = new Database(":memory:");
     runMigrations(upgradeDb);
     const legacyRoot = "legacy-root";
@@ -1520,7 +1520,7 @@ describe("authoritative PR-group ledger", () => {
       SELECT repository, pr_number, base_sha
       FROM pr_group_events WHERE id = 'legacy-event'
     `).get()).toEqual({ repository: "hasna/todos", pr_number: null, base_sha: null });
-    expect(upgradeDb.query("SELECT MAX(id) AS id FROM _migrations").get()).toEqual({ id: 67 });
+    expect(upgradeDb.query("SELECT MAX(id) AS id FROM _migrations").get()).toEqual({ id: 68 });
 
     const upgradedLedger = new PrGroupLedger(new SqlitePrGroupLedgerPersistence(upgradeDb));
     const legacyAdmission = admission({
