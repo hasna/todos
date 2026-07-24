@@ -1562,9 +1562,6 @@ export function registerTaskCommands(program: Command) {
       if (isPlanAction && Boolean(opts.plan) === Boolean(opts.clearPlan)) {
         handleError(new Error("Use exactly one of --plan or --clear-plan with bulk plan."));
       }
-      const planId = isPlanAction
-        ? opts.plan ? resolvePlanId(opts.plan) : null
-        : undefined;
       const knownActions = new Set(["done", "complete", "start", "delete", "plan", "move-plan"]);
       if (!knownActions.has(action)) {
         handleError(new Error(`Unknown action: ${action}. Use: done, start, delete, plan`));
@@ -1575,6 +1572,25 @@ export function registerTaskCommands(program: Command) {
       // "Task not found" for valid cloud task ids (while `bulk delete` silently
       // no-op'd), a split-brain read.
       if (cloud) {
+        // Plan refs must resolve against the shared dataset too: the local
+        // `resolvePlanId` reads this machine's sqlite, which is unavailable (and
+        // wrong) under remote authority. Resolve once, up front, so an unknown
+        // plan fails closed before any task is mutated — same contract as the
+        // local path below.
+        let cloudPlanId: string | null | undefined;
+        if (isPlanAction) {
+          if (opts.plan) {
+            try {
+              const plan = await cloudResolvePlan(cloud, opts.plan);
+              if (!plan) throw new Error(`Could not resolve plan ID: ${opts.plan}`);
+              cloudPlanId = plan.id;
+            } catch (e) {
+              handleError(e);
+            }
+          } else {
+            cloudPlanId = null;
+          }
+        }
         for (const rawId of ids) {
           try {
             const resolvedId = await resolveTaskIdForCommand(rawId, cloud);
@@ -1587,7 +1603,7 @@ export function registerTaskCommands(program: Command) {
             } else {
               const current = await cloudGetTask(cloud, resolvedId);
               if (!current) throw new Error(`Task not found: ${rawId}`);
-              await cloudUpdateTask(cloud, resolvedId, { version: current.version, plan_id: planId });
+              await cloudUpdateTask(cloud, resolvedId, { version: current.version, plan_id: cloudPlanId });
             }
             results.push({ id: resolvedId, success: true });
           } catch (e) {
@@ -1606,6 +1622,10 @@ export function registerTaskCommands(program: Command) {
         }
         return;
       }
+
+      const planId = isPlanAction
+        ? opts.plan ? resolvePlanId(opts.plan) : null
+        : undefined;
 
       for (const rawId of ids) {
         try {
