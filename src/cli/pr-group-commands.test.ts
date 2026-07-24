@@ -104,7 +104,11 @@ describe("PR-group CLI views", () => {
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr).toMatch(/local SQLite fallback is disabled/i);
     expect(existsSync(shadowPath)).toBe(false);
-    expect(result.stdout.trim()).toBe("");
+    // The `--json` error contract emits only the machine-readable error envelope
+    // on stdout (never an authoritative view), so fail-closed behavior holds.
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      error: expect.stringMatching(/local SQLite fallback is disabled/i),
+    });
   });
 
   test("malformed authoritative remote envelopes map to REMOTE_API_INCOMPATIBLE", async () => {
@@ -125,7 +129,11 @@ describe("PR-group CLI views", () => {
       expect(result.stderr).toContain("REMOTE_API_INCOMPATIBLE");
       expect(result.stderr).toMatch(/local SQLite fallback is disabled/i);
       expect(existsSync(shadowPath)).toBe(false);
-      expect(result.stdout.trim()).toBe("");
+      // The `--json` error contract emits only the machine-readable error envelope
+      // on stdout (never an authoritative view), so fail-closed behavior holds.
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        error: expect.stringContaining("REMOTE_API_INCOMPATIBLE"),
+      });
     } finally {
       server.stop(true);
     }
