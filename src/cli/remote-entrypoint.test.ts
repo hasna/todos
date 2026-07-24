@@ -1120,6 +1120,12 @@ describe("remote CLI entrypoint authority boundary", () => {
       expect(JSON.parse(await runRemoteOk(["--json", "bulk", "move-plan", bulkTaskId, "--clear-plan"])))
         .toMatchObject({ succeeded: 1, failed: 0 });
       expect(JSON.parse(await runRemoteOk(["--json", "show", bulkTaskId])).plan_id).toBeNull();
+      // A non-UUID plan ref resolves remotely too, scoped by `--project` the
+      // same way `add --plan` scopes it.
+      expect(JSON.parse(await runRemoteOk(
+        ["--project", PROJECT_ID, "--json", "bulk", "plan", bulkTaskId, "--plan", "delivery"],
+      ))).toMatchObject({ succeeded: 1, failed: 0 });
+      expect(JSON.parse(await runRemoteOk(["--json", "show", bulkTaskId])).plan_id).toBe(PLAN_ID);
 
       const unknownPlan = await runCli(
         executable,

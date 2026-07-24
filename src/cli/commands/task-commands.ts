@@ -1581,7 +1581,13 @@ export function registerTaskCommands(program: Command) {
         if (isPlanAction) {
           if (opts.plan) {
             try {
-              const plan = await cloudResolvePlan(cloud, opts.plan);
+              // Scope a non-UUID plan ref (slug/name) to `--project` when the
+              // caller gave one, exactly like `add --plan`, so the same
+              // reference resolves the same way across commands.
+              const projectScope = globalOpts.project
+                ? await cloudResolveProjectRef(cloud, globalOpts.project)
+                : undefined;
+              const plan = await cloudResolvePlan(cloud, opts.plan, projectScope);
               if (!plan) throw new Error(`Could not resolve plan ID: ${opts.plan}`);
               cloudPlanId = plan.id;
             } catch (e) {
