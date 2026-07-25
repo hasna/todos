@@ -32,7 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `anonymous-loopback` — explicitly requested via `--allow-anonymous` /
     `TODOS_ALLOW_ANONYMOUS=1` **and** a loopback bind host; anonymous requests are
     additionally required to come from a loopback transport peer (the check ignores
-    `x-forwarded-for`, so `TODOS_TRUST_PROXY=1` cannot be used to spoof one);
+    `x-forwarded-for`, so `TODOS_TRUST_PROXY=1` cannot be used to spoof one). The
+    stored-key check is re-evaluated per request under this posture, so
+    `todos api-keys create` closes an already-open anonymous window without a restart;
   - otherwise the server **refuses to start**, exiting non-zero with an actionable
     error naming `TODOS_API_KEY` — starting wide open is never an option.
   `/v1` was not affected (it authenticates itself against the cloud API-key store) and
