@@ -272,3 +272,60 @@ describe("data routes reject credential-less requests", () => {
     expect(version.toLowerCase()).not.toContain("postgres");
   });
 });
+
+// ── 3. Minting a key closes an already-open anonymous window ──────────────────
+describe("anonymous-loopback upgrades to enforce when a key appears", () => {
+  let port: number;
+  let proc: ReturnType<typeof Bun.spawn>;
+  let tmpDir: string;
+  let dbPath: string;
+
+  const url = (path: string) => localUrl(port, path);
+
+  beforeAll(async () => {
+    port = reserveFreePort(19900 + Math.floor(Math.random() * 100));
+    tmpDir = await mkdtemp(join(tmpdir(), "todos-anon-upgrade-"));
+    dbPath = join(tmpDir, "test.db");
+    proc = spawnServer(
+      port,
+      localRoutingTestEnv({ TODOS_DB_PATH: dbPath, TODOS_AUTO_PROJECT: "false", TODOS_NO_OPEN: "true" }),
+      ["--allow-anonymous"],
+    );
+
+    let ready = false;
+    for (let i = 0; i < 75; i++) {
+      try {
+        const res = await fetch(url("/api/stats"));
+        if (res.ok) { ready = true; break; }
+      } catch {
+        // not up yet
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    if (!ready) throw new Error(`anonymous-upgrade test server did not start on port ${port}`);
+  }, HOOK_TIMEOUT_MS);
+
+  afterAll(async () => {
+    proc.kill();
+    await proc.exited;
+    await rm(tmpDir, { recursive: true, force: true });
+  }, HOOK_TIMEOUT_MS);
+
+  it("stops serving anonymously as soon as an API key is minted, without a restart", async () => {
+    // Sanity: the explicit loopback opt-in is in effect.
+    expect((await fetch(url("/api/stats"))).status).toBe(200);
+
+    const previousDbPath = process.env["TODOS_DB_PATH"];
+    process.env["TODOS_DB_PATH"] = dbPath;
+    resetDatabase();
+    getDatabase();
+    const minted = createApiKey({ name: "minted while serving" }).key;
+    closeDatabase();
+    resetDatabase();
+    if (previousDbPath === undefined) delete process.env["TODOS_DB_PATH"];
+    else process.env["TODOS_DB_PATH"] = previousDbPath;
+
+    expect((await fetch(url("/api/stats"))).status).toBe(401);
+    expect((await fetch(url("/api/stats"), { headers: { "x-api-key": minted } })).status).toBe(200);
+  }, HOOK_TIMEOUT_MS);
+});

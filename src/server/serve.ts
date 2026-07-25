@@ -120,9 +120,15 @@ export function checkAuth(
   if (posture.mode === "local-plane-disabled") return localPlaneDisabled();
 
   if (posture.mode === "anonymous-loopback") {
-    // Defense in depth: the bind host is already loopback, but a proxy/tunnel in
-    // front of the process must not be able to launder off-box traffic in.
-    return isLoopbackAddress(clientIp) ? null : unauthorized();
+    // An operator who mints a key while the server is running (`todos api-keys
+    // create`) expects it to take effect — re-check per request so the anonymous
+    // window closes without a restart. This is the same per-request query the old
+    // fail-open implementation already did.
+    if (!hasActiveApiKeys()) {
+      // Defense in depth: the bind host is already loopback, but a proxy/tunnel in
+      // front of the process must not be able to launder off-box traffic in.
+      return isLoopbackAddress(clientIp) ? null : unauthorized();
+    }
   }
 
   const provided = getProvidedApiKey(req);
