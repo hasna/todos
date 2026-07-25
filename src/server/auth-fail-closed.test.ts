@@ -28,7 +28,11 @@ const REPO_ROOT = join(import.meta.dir, "..", "..");
 const HOOK_TIMEOUT_MS = 20_000;
 const LOOPBACK = "http://127.0.0.1";
 
-/** Built via a helper so no `fetch("http://…")` literal trips the headless boundary scan. */
+/**
+ * Loopback test URLs are assembled here so no inline absolute-URL literal appears at a
+ * call site — `src/lib/headless-boundaries.test.ts` scans server sources for exactly
+ * that pattern to prove the server never performs outbound HTTP.
+ */
 function localUrl(port: number, path: string): string {
   return `${LOOPBACK}:${port}${path}`;
 }
