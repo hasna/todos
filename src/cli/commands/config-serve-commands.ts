@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { DEFAULT_PORT as DEFAULT_SERVER_PORT } from "../../server/port.js";
 import { getDatabase } from "../../db/database.js";
 import { listTasks } from "../../db/tasks.js";
 import { loadConfig } from "../../lib/config.js";
@@ -1165,7 +1166,7 @@ export function registerConfigServeCommands(program: Command) {
   program
     .command("serve")
     .description("Start the web dashboard")
-    .option("--port <port>", "Port number", "19427")
+    .option("--port <port>", "Port number", String(DEFAULT_SERVER_PORT))
     .option("--host <host>", "Host to bind (default: 127.0.0.1 localhost only, use 0.0.0.0 for all interfaces)")
     .option("--api-key <key>", "Require this API key for /api/* requests")
     .option("--allow-anonymous", "Local dev only: serve /api/* and /mcp without a credential (refused unless the bind host is loopback)")
