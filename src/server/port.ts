@@ -28,10 +28,34 @@ export function coercePort(raw: string | undefined): number | undefined {
   // is the one value with special meaning (ephemeral), so garbage would have been
   // promoted into a silent random-port bind — the same failure this function
   // exists to prevent. "1e3" -> 1 and "12abc" -> 12 were equally wrong.
-  if (!/^\d+$/.test(raw.trim())) return undefined;
-  const parsed = Number.parseInt(raw.trim(), 10);
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return undefined;
+  // Ephemeral must be spelled exactly "0". `/^\d+$/` also admits "00" and "000",
+  // which parse to 0 and would therefore request a random port — and `--port 00`
+  // is far likelier to be a typo for a real port than a deliberate ask for an
+  // arbitrary one. Requesting the kernel's choice should be unambiguous.
+  if (trimmed.length > 1 && trimmed.startsWith("0")) return undefined;
+  const parsed = Number.parseInt(trimmed, 10);
   if (!Number.isInteger(parsed) || parsed > 65535) return undefined;
   return parsed;
+}
+
+/**
+ * Refuses an explicitly supplied port that is not a port at all.
+ *
+ * Silently substituting the default is the same defect class as the silent
+ * ephemeral bind this module was written to remove: the operator asked for one
+ * thing, got another, and was told nothing. A typo in a port is always a mistake
+ * worth stopping for, and stopping costs nothing — the server had not started.
+ * Absent input is NOT an error; only a value that was provided and cannot be a
+ * port.
+ */
+export function refuseInvalidPort(source: string, raw: string): never {
+  console.error(
+    `Invalid ${source}: ${JSON.stringify(raw)} is not a port.\n`
+    + `Use an integer from 0 to 65535, where 0 asks the kernel for a free port.`,
+  );
+  process.exit(1);
 }
 
 /**

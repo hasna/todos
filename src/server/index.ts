@@ -7,7 +7,7 @@
  */
 
 import { getPackageVersion } from "../lib/package-version.js";
-import { DEFAULT_PORT, coercePort, findFreePort } from "./port.js";
+import { DEFAULT_PORT, coercePort, findFreePort, refuseInvalidPort } from "./port.js";
 
 function hasVersionFlag(): boolean {
   return process.argv.includes("--version") || process.argv.includes("-V");
@@ -46,11 +46,13 @@ Environment:
 function parsePort(): number {
   const portArg = process.argv.find((a) => a === "--port" || a.startsWith("--port="));
   if (portArg) {
-    if (portArg.includes("=")) {
-      return coercePort(portArg.split("=")[1]) ?? DEFAULT_PORT;
-    }
-    const idx = process.argv.indexOf(portArg);
-    return coercePort(process.argv[idx + 1]) ?? DEFAULT_PORT;
+    const raw = portArg.includes("=")
+      ? portArg.split("=")[1]
+      : process.argv[process.argv.indexOf(portArg) + 1];
+    // An explicit --port that cannot be a port is refused rather than quietly
+    // replaced by the default, which would start the server somewhere the
+    // operator did not ask for and say nothing.
+    return coercePort(raw) ?? refuseInvalidPort("--port", raw ?? "");
   }
   return DEFAULT_PORT;
 }
@@ -176,7 +178,13 @@ async function main() {
   // When PORT is set (container/service deployment) bind it EXACTLY — never scan
   // for a free port, or the ALB health check would target the wrong port.
   const explicitPortArg = process.argv.some((a) => a === "--port" || a.startsWith("--port="));
-  const envPort = coercePort(process.env.PORT);
+  // An empty PORT is treated as unset, which is how containers and shells
+  // routinely express "no value". A non-empty PORT that is not a port is refused,
+  // for the same reason an explicit --port is.
+  const rawEnvPort = process.env.PORT?.trim();
+  const envPort = rawEnvPort
+    ? coercePort(rawEnvPort) ?? refuseInvalidPort("PORT", rawEnvPort)
+    : undefined;
   const requestedPort = explicitPortArg ? parsePort() : (envPort ?? parsePort());
   // An explicitly requested port (including 0 = "kernel, pick one") is bound as
   // asked. Only the implicit default may scan for a free port.
