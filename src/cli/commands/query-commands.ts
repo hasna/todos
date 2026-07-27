@@ -88,6 +88,7 @@ import {
   doctorExitCode,
   printDoctorVerdict,
   printIntegrityReport,
+  resolveDoctorVerdict,
 } from "../doctor-integrity.js";
 import { TASK_STATUSES } from "../../types/index.js";
 
@@ -920,16 +921,20 @@ export function registerQueryCommands(program: Command) {
           taskLists,
           scanTasks: Boolean(opts.scanTasks),
         });
-        const verdict = doctorExitCode({
+        const verdict = resolveDoctorVerdict(doctorExitCode({
           errors: integrity.summary.errors,
           findings: integrity.summary.findings,
           incomplete: !integrity.summary.complete,
-        });
+        }), opts.failOnFindings !== false);
         const result = {
           schema_version: "todos.remote-doctor.v1",
           // Honest verdict: derived from the very condition rows printed below.
           ok: integrity.summary.ok,
-          exit_code: verdict,
+          // `exit_code` is the status the process RETURNS; `verdict_exit_code` is
+          // what the rows imply. They differ only under --no-fail-on-findings.
+          exit_code: verdict.effective,
+          verdict_exit_code: verdict.verdict,
+          fail_on_findings: verdict.fail_on_findings,
           dry_run: true,
           mode: "remote-http",
           authority: { v1_base_url: cloud.baseUrl, local_fallback: false },
@@ -957,20 +962,25 @@ export function registerQueryCommands(program: Command) {
               : undefined,
           });
         }
-        process.exitCode = opts.failOnFindings === false ? 0 : verdict;
+        process.exitCode = verdict.effective;
         return;
       }
       const { runTodosDoctor } = await import("../../lib/doctor.js");
       const result = runTodosDoctor({ apply: Boolean(opts.apply || opts.fix) });
-      const verdict = doctorExitCode({
+      const verdict = resolveDoctorVerdict(doctorExitCode({
         errors: result.summary.errors,
         findings: result.summary.integrity_findings,
         incomplete: result.summary.integrity_unverified > 0,
-      });
+      }), opts.failOnFindings !== false);
 
       if (jsonMode) {
-        console.log(JSON.stringify({ ...result, exit_code: verdict }));
-        process.exitCode = opts.failOnFindings === false ? 0 : verdict;
+        console.log(JSON.stringify({
+          ...result,
+          exit_code: verdict.effective,
+          verdict_exit_code: verdict.verdict,
+          fail_on_findings: verdict.fail_on_findings,
+        }));
+        process.exitCode = verdict.effective;
         return;
       }
 
@@ -1000,7 +1010,7 @@ export function registerQueryCommands(program: Command) {
         }
       }
       const { errors, warnings } = result.summary;
-      if (verdict === 0 && errors === 0 && warnings === 0) console.log(chalk.green("\n  All clear."));
+      if (verdict.verdict === 0 && errors === 0 && warnings === 0) console.log(chalk.green("\n  All clear."));
       else {
         printDoctorVerdict(verdict, result.integrity.summary, {
           hint: result.summary.repairable > 0 && result.dry_run
@@ -1009,7 +1019,7 @@ export function registerQueryCommands(program: Command) {
         });
         console.log(chalk.dim(`  ${errors} error(s), ${warnings} warning(s) across all checks.`));
       }
-      process.exitCode = opts.failOnFindings === false ? 0 : verdict;
+      process.exitCode = verdict.effective;
     });
 
   // doctor routing — deterministic routing-metadata drift detection + safe repair

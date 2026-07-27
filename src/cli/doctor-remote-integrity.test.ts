@@ -268,6 +268,50 @@ describe("todos doctor against a remote /v1 authority", () => {
     }
   });
 
+  test("refuses to treat a PARTIAL authority report as clean: 2 of 6 clean conditions still exits 2", async () => {
+    // The emergent property worth pinning: an authority that reports only some
+    // conditions — an older or newer build, or one whose backend answered part of
+    // the set — must not shrink the checked set to whatever it happened to send.
+    // Every count it did send is zero here, so nothing is a finding; the verdict is
+    // INCOMPLETE, never clean.
+    const partial = {
+      integrity: {
+        schema_version: "todos.integrity.v1",
+        generated_at: "2026-07-27T00:00:00.000Z",
+        source: "postgres",
+        conditions: [
+          { id: "tasks_without_project", count: 0, open_count: 0, verified: true, severity: null, source: "postgres", message: "0", impact: "" },
+          { id: "task_lists_without_project", count: 0, open_count: null, verified: true, severity: null, source: "postgres", message: "0", impact: "" },
+        ],
+        summary: { ok: true, findings: 0, rows: 0, errors: 0, warnings: 0, unverified: 0, complete: true },
+      },
+    };
+    const { server, requests } = startFixtureAuthority({ taskLists: [], integrity: partial });
+    try {
+      const human = await runRemoteCli(["doctor"], server.port);
+      expect({ exitCode: human.exitCode, stderr: human.stderr }).toEqual({ exitCode: 2, stderr: "" });
+      expect(human.stdout).toContain("INCOMPLETE");
+      for (const id of ["tasks_without_task_list", "tasks_with_unregistered_project", "tasks_with_unregistered_task_list", "task_lists_with_unregistered_project"]) {
+        expect(human.stdout).toContain(`${id} NOT CHECKED — authority did not report this condition`);
+      }
+
+      const json = await runRemoteCli(["--json", "doctor"], server.port);
+      expect(json.exitCode).toBe(2);
+      const report = JSON.parse(json.stdout) as {
+        ok: boolean; exit_code: number; verdict_exit_code: number;
+        integrity: { summary: { ok: boolean; findings: number; unverified: number; complete: boolean }; conditions: Array<{ id: string; count: number | null; verified: boolean }> };
+      };
+      expect(report).toMatchObject({ ok: false, exit_code: 2, verdict_exit_code: 2 });
+      expect(report.integrity.summary).toMatchObject({ ok: false, findings: 0, unverified: 4, complete: false });
+      expect(report.integrity.conditions).toHaveLength(6);
+      expect(report.integrity.conditions.filter((condition) => condition.count === null)).toHaveLength(4);
+      // A partial report must not send doctor off to page the whole task set either.
+      expect(requests.some((entry) => entry.startsWith("GET /v1/tasks?"))).toBe(false);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("a clean authority aggregate exits 0", async () => {
     const conditions = [
       "tasks_without_project", "tasks_without_task_list", "tasks_with_unregistered_project",

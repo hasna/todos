@@ -1395,8 +1395,23 @@ todos doctor --json
 Advisory warnings (stale `in_progress` tasks, project paths missing on this
 machine, duplicate indexes) are reported but do **not** change the exit code.
 Findings dominate an incomplete report: a run with both exits `1` and says how
-many conditions went unchecked. `--no-fail-on-findings` forces exit `0` for a
-legacy consumer that gates on the exit code; the findings are still printed.
+many conditions went unchecked.
+
+`--no-fail-on-findings` forces exit `0` for a legacy consumer that gates on the
+exit code. The findings are still printed, and the suppression is stated rather
+than hidden — the printed code is always the one the process returns:
+
+```
+6 integrity condition(s) FAILED — 6 row(s) affected (5 error, 1 warning). (exit 0 — findings gate suppressed by --no-fail-on-findings; the verdict is 1)
+```
+
+`--json` therefore carries both numbers, and they must never be conflated:
+
+| field | meaning |
+| --- | --- |
+| `exit_code` | the status the process **returns** (what a caller observes) |
+| `verdict_exit_code` | the status the reported rows **imply**, ignoring suppression |
+| `fail_on_findings` | `false` when the gate was opted out of |
 
 ### Referential conditions
 

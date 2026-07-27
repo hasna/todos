@@ -40,13 +40,50 @@ import { cloudGetIntegrityReport, cloudScanTaskRows, type CloudTaskScan } from "
  *
  * Findings dominate: a run with both findings and unverified conditions exits 1
  * and says how many conditions were not checked.
+ *
+ * `--no-fail-on-findings` SUPPRESSES the gate: the process then exits 0 while the
+ * findings are still printed. Two numbers therefore exist and must never be
+ * conflated — the VERDICT the rows imply, and the EFFECTIVE status the process
+ * returns. Printing one while returning the other would be this command's own
+ * defect in miniature, so {@link DoctorVerdict} carries both and every renderer
+ * and JSON field states which it is showing.
  */
 export const DOCTOR_EXIT_CODES = { clean: 0, findings: 1, incomplete: 2 } as const;
 
-export function doctorExitCode(input: { errors: number; findings: number; incomplete: boolean }): 0 | 1 | 2 {
+export type DoctorExitCode = 0 | 1 | 2;
+
+export function doctorExitCode(input: { errors: number; findings: number; incomplete: boolean }): DoctorExitCode {
   if (input.findings > 0 || input.errors > 0) return DOCTOR_EXIT_CODES.findings;
   if (input.incomplete) return DOCTOR_EXIT_CODES.incomplete;
   return DOCTOR_EXIT_CODES.clean;
+}
+
+export interface DoctorVerdict {
+  /** What the reported rows imply, ignoring any suppression. */
+  verdict: DoctorExitCode;
+  /** What the process actually exits with — the number a caller can observe. */
+  effective: DoctorExitCode;
+  /** True when the findings gate is active (i.e. `--no-fail-on-findings` absent). */
+  fail_on_findings: boolean;
+  /** True when the gate was opted out of AND that changed the status. */
+  suppressed: boolean;
+}
+
+/**
+ * Resolve both numbers in one place so the human line, the JSON contract and
+ * `process.exitCode` cannot disagree.
+ */
+export function resolveDoctorVerdict(
+  verdict: DoctorExitCode,
+  failOnFindings: boolean,
+): DoctorVerdict {
+  const effective: DoctorExitCode = failOnFindings ? verdict : DOCTOR_EXIT_CODES.clean;
+  return {
+    verdict,
+    effective,
+    fail_on_findings: failOnFindings,
+    suppressed: effective !== verdict,
+  };
 }
 
 export interface RemoteIntegrityOptions {
@@ -147,24 +184,34 @@ export function printIntegrityReport(report: IntegrityReport): void {
   }
 }
 
-/** Verdict line + exit-code meaning, derived from the printed summary. */
+/**
+ * Verdict line + exit-code meaning, derived from the printed summary.
+ *
+ * The parenthetical states the code the process ACTUALLY returns. When the gate
+ * was opted out of, it says so and names the code the findings would otherwise
+ * have produced — a printed `(exit 1)` next to a process that exits 0 is a
+ * printed falsehood, which is the whole class of defect this command was fixed for.
+ */
 export function printDoctorVerdict(
-  exitCode: 0 | 1 | 2,
+  verdict: DoctorVerdict,
   summary: IntegritySummary,
   options: { hint?: string } = {},
 ): void {
-  if (exitCode === DOCTOR_EXIT_CODES.clean) {
-    console.log(chalk.green(`\n  Integrity clean: ${summary.findings} finding(s), all ${INTEGRITY_CONDITIONS.length} conditions checked. (exit 0)`));
-  } else if (exitCode === DOCTOR_EXIT_CODES.findings) {
-    console.log(chalk.red(
+  const exitText = verdict.suppressed
+    ? `(exit ${verdict.effective} — findings gate suppressed by --no-fail-on-findings; the verdict is ${verdict.verdict})`
+    : `(exit ${verdict.effective})`;
+  if (verdict.verdict === DOCTOR_EXIT_CODES.clean) {
+    console.log(chalk.green(`\n  Integrity clean: ${summary.findings} finding(s), all ${INTEGRITY_CONDITIONS.length} conditions checked. ${exitText}`));
+  } else if (verdict.verdict === DOCTOR_EXIT_CODES.findings) {
+    console.log(chalk[verdict.suppressed ? "yellow" : "red"](
       `\n  ${summary.findings} integrity condition(s) FAILED — ${summary.rows} row(s) affected ` +
-      `(${summary.errors} error, ${summary.warnings} warning). (exit 1)`,
+      `(${summary.errors} error, ${summary.warnings} warning). ${exitText}`,
     ));
     if (summary.unverified > 0) console.log(chalk.yellow(`  ${summary.unverified} further condition(s) were NOT checked.`));
   } else {
     console.log(chalk.yellow(
       `\n  INCOMPLETE: no findings, but ${summary.unverified} of ${INTEGRITY_CONDITIONS.length} conditions were NOT checked, ` +
-      "so this dataset has NOT been shown to be clean. (exit 2)",
+      `so this dataset has NOT been shown to be clean. ${exitText}`,
     ));
   }
   if (options.hint) console.log(chalk.dim(`  ${options.hint}`));

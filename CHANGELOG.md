@@ -46,8 +46,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   findings, but a condition could not be measured). Advisory warnings (stale `in_progress`
   tasks, project paths missing on this machine, duplicate indexes) do not change the exit
   code. `--no-fail-on-findings` is the explicit opt-out for a consumer that gates on exit `0`;
-  findings are still reported. `doctor --json` gains `exit_code` and an `integrity` block
-  (`schema_version: "todos.integrity.v1"`); `ok` keeps its name and finally means what it says.
+  findings are still reported, and the printed exit code is always the one the process
+  returns — a suppressed run prints `(exit 0 — findings gate suppressed by
+  --no-fail-on-findings; the verdict is 1)` rather than a `(exit 1)` the process never
+  used. `doctor --json` gains an `integrity` block (`schema_version:
+  "todos.integrity.v1"`) plus `exit_code` (the status the process RETURNS),
+  `verdict_exit_code` (the status the rows IMPLY) and `fail_on_findings`; `ok` keeps its
+  name and finally means what it says.
 - **Integrity findings are report-only.** `doctor --apply` repairs schema/hygiene only and
   never rewrites, deletes or re-points an orphaned row; `--apply` remains refused outright
   against a remote authority.

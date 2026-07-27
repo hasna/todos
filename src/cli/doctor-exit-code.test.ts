@@ -193,6 +193,35 @@ describe("todos doctor exit-code contract (local mode)", () => {
     expect(result.stdout).toContain("integrity condition(s) FAILED");
   });
 
+  test("the PRINTED exit code is the one the process returns, even when the gate is suppressed", async () => {
+    // A printed `(exit 1)` next to a process that exits 0 is a printed falsehood —
+    // the exact defect class this command was fixed for. The findings text stays;
+    // the parenthetical must state the real status and name the suppressed verdict.
+    const suppressed = await runCli(["doctor", "--no-fail-on-findings"], dirtyDb);
+    expect(suppressed.exitCode).toBe(0);
+    expect(suppressed.stdout).toContain("(exit 0 — findings gate suppressed by --no-fail-on-findings; the verdict is 1)");
+    expect(suppressed.stdout).not.toContain("(exit 1)");
+
+    // Gate active: the printed code and the process status agree at 1.
+    const gated = await runCli(["doctor"], dirtyDb);
+    expect(gated.exitCode).toBe(1);
+    expect(gated.stdout).toContain("(exit 1)");
+    expect(gated.stdout).not.toContain("suppressed");
+
+    // The JSON contract carries both numbers, and `exit_code` is the OBSERVED one.
+    const suppressedJson = await runCli(["--json", "doctor", "--no-fail-on-findings"], dirtyDb);
+    const gatedJson = await runCli(["--json", "doctor"], dirtyDb);
+    expect(suppressedJson.exitCode).toBe(0);
+    expect(gatedJson.exitCode).toBe(1);
+    const parsedSuppressed = JSON.parse(suppressedJson.stdout) as { ok: boolean; exit_code: number; verdict_exit_code: number; fail_on_findings: boolean };
+    const parsedGated = JSON.parse(gatedJson.stdout) as { exit_code: number; verdict_exit_code: number; fail_on_findings: boolean };
+    expect(parsedSuppressed).toMatchObject({ ok: false, exit_code: 0, verdict_exit_code: 1, fail_on_findings: false });
+    expect(parsedGated).toMatchObject({ exit_code: 1, verdict_exit_code: 1, fail_on_findings: true });
+    // `exit_code` must equal the status the caller actually observed, in both runs.
+    expect(parsedSuppressed.exit_code).toBe(suppressedJson.exitCode);
+    expect(parsedGated.exit_code).toBe(gatedJson.exitCode);
+  });
+
   test("--apply never repairs an integrity finding: the counts are identical afterwards", async () => {
     const before = JSON.parse((await runCli(["--json", "doctor"], dirtyDb)).stdout) as
       { integrity: { conditions: Array<{ id: string; count: number | null }> } };

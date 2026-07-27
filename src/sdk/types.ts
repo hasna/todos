@@ -218,6 +218,12 @@ export interface DoctorResponse {
    * "the request succeeded" flag.
    */
   ok: boolean;
+  /** Status the `doctor` process RETURNS (0 clean, 1 findings, 2 incomplete). */
+  exit_code?: 0 | 1 | 2;
+  /** Status the reported rows IMPLY, ignoring `--no-fail-on-findings`. */
+  verdict_exit_code?: 0 | 1 | 2;
+  /** False when the findings gate was opted out of, making `exit_code` 0 regardless. */
+  fail_on_findings?: boolean;
   dry_run?: boolean;
   database_path?: string;
   migration?: { current: number; expected: number };
