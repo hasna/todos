@@ -50,9 +50,19 @@ export function doctorExitCode(input: { errors: number; findings: number; incomp
 }
 
 export interface RemoteIntegrityOptions {
-  /** Projects already fetched for the route check — the registered-id denominator. */
+  /**
+   * Projects already fetched for the route check — the registered-id denominator
+   * for a dangling project reference.
+   *
+   * ASSUMPTION, shared with `todos lists` / `todos projects`: `GET /v1/projects`
+   * and `GET /v1/task-lists` return the COMPLETE collection (neither route takes a
+   * limit and neither response carries a `total`, so truncation is not detectable
+   * from the envelope). If an authority ever paginates them, a truncated
+   * denominator would over-report dangling references — prefer
+   * `GET /v1/integrity`, which counts server-side and is immune to this.
+   */
   projects: Project[];
-  /** Task lists already fetched for the route check. */
+  /** Task lists already fetched for the route check (same completeness assumption). */
   taskLists: TaskList[];
   /** Opt in to the paged `/v1/tasks` walk when the authority has no aggregate route. */
   scanTasks: boolean;
