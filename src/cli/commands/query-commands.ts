@@ -975,6 +975,11 @@ export function registerQueryCommands(program: Command) {
       }
 
       console.log(chalk.bold("todos doctor\n"));
+      // Never let a flag be silently ignored — that is a smaller version of the
+      // same defect this command was fixed for.
+      if (opts.scanTasks) {
+        console.log(chalk.dim("  Note: --scan-tasks applies to a remote authority only; local SQL counts every condition directly."));
+      }
       console.log(`  ${chalk.dim("Mode:")} ${result.dry_run ? "dry-run" : "apply"}`);
       console.log(`  ${chalk.dim("Database:")} ${result.database_path}`);
       if (result.backup) console.log(`  ${chalk.dim("Backup:")} ${result.backup.path}`);
