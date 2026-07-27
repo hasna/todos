@@ -15,6 +15,7 @@ import chalk from "chalk";
 import type { HasnaStorageClient } from "@hasna/contracts/client/storage";
 import type { Project, TaskList } from "../types/index.js";
 import {
+  adoptRemoteIntegrityReport,
   buildIntegrityReport,
   INTEGRITY_CONDITIONS,
   measureIntegrityRows,
@@ -85,7 +86,12 @@ export async function buildRemoteIntegrityReport(
   options: RemoteIntegrityOptions,
 ): Promise<RemoteIntegrityResult> {
   const authority = await cloudGetIntegrityReport(client);
-  if (authority) return { integrity: authority, scan: null };
+  // The authority's counts are adopted; its VERDICT is not. The summary is
+  // recomputed from the rows it sent, and any condition this build knows about but
+  // the authority did not report becomes UNVERIFIED rather than vanishing.
+  if (authority) {
+    return { integrity: adoptRemoteIntegrityReport(authority, new Date().toISOString()), scan: null };
+  }
 
   const scan = options.scanTasks ? await cloudScanTaskRows(client) : null;
   const sets: IntegrityRowSets = {

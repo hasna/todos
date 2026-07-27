@@ -66,6 +66,8 @@ export type IntegritySource =
   | "remote-authority"
   | "remote-scan"
   | "remote-rows"
+  /** More than one measured source in a single report (the remote derivation path). */
+  | "remote-derived"
   | "unverified";
 
 export interface IntegrityConditionSpec {
@@ -320,15 +322,74 @@ export function buildIntegrityReport(
   conditions: IntegrityCondition[],
   generatedAt: string,
 ): IntegrityReport {
-  const sources = new Set(conditions.map((condition) => condition.source));
-  const measuredSources = [...sources].filter((source) => source !== "unverified");
+  const measuredSources = [...new Set(conditions.map((condition) => condition.source))]
+    .filter((source) => source !== "unverified");
   return {
     schema_version: TODOS_INTEGRITY_SCHEMA_VERSION,
     generated_at: generatedAt,
-    source: measuredSources.length === 1 ? measuredSources[0]! : sources.has("unverified") && measuredSources.length === 0 ? "unverified" : "remote-rows",
+    // Report-level label only; the authoritative provenance is per condition.
+    source: measuredSources.length === 0
+      ? "unverified"
+      : measuredSources.length === 1 ? measuredSources[0]! : "remote-derived",
     conditions,
     summary: summarizeIntegrity(conditions),
   };
+}
+
+/**
+ * Normalize a report that came from ANOTHER process (an authority's
+ * `GET /v1/integrity`) against this build's condition list, and RECOMPUTE the
+ * summary from the returned counts.
+ *
+ * Two ways a remote report could otherwise reintroduce the original bug:
+ *   - the authority sends `summary.ok: true` next to non-zero counts, and the
+ *     client believes the flag instead of the rows;
+ *   - the authority is older/newer and simply omits a condition, which would
+ *     silently shrink the checked set to whatever it happened to send.
+ * Both are closed here: unknown conditions are dropped, missing ones become
+ * UNVERIFIED, and the verdict is recomputed locally.
+ */
+export function adoptRemoteIntegrityReport(
+  raw: { generated_at?: unknown; source?: unknown; conditions?: unknown },
+  fallbackGeneratedAt: string,
+): IntegrityReport {
+  const received = new Map<string, Record<string, unknown>>();
+  if (Array.isArray(raw.conditions)) {
+    for (const entry of raw.conditions as Array<Record<string, unknown>>) {
+      if (entry && typeof entry["id"] === "string") received.set(entry["id"], entry);
+    }
+  }
+  const conditions = INTEGRITY_CONDITIONS.map((spec) => {
+    const entry = received.get(spec.id);
+    const count = entry?.["count"];
+    const verified = entry?.["verified"];
+    if (!entry || verified === false || typeof count !== "number" || !Number.isFinite(count)) {
+      return unverifiedCondition(
+        spec,
+        entry
+          ? typeof entry["unverified_reason"] === "string"
+            ? String(entry["unverified_reason"])
+            : "authority reported this condition without a usable count"
+          : "authority did not report this condition",
+      );
+    }
+    const openRaw = entry["open_count"];
+    return measuredCondition(
+      spec,
+      {
+        count,
+        open_count: spec.entity === "task" ? (typeof openRaw === "number" && Number.isFinite(openRaw) ? openRaw : 0) : null,
+      },
+      typeof raw.source === "string" && raw.source === "postgres" ? "postgres" : "remote-authority",
+    );
+  });
+  const report = buildIntegrityReport(
+    conditions,
+    typeof raw.generated_at === "string" ? raw.generated_at : fallbackGeneratedAt,
+  );
+  return typeof raw.source === "string" && (raw.source === "sqlite" || raw.source === "postgres")
+    ? { ...report, source: raw.source }
+    : report;
 }
 
 // ── SQLite renderer (relational tables, real foreign keys) ────────────────────

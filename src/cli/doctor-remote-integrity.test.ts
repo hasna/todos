@@ -230,6 +230,44 @@ describe("todos doctor against a remote /v1 authority", () => {
     }
   });
 
+  test("does NOT trust an authority that claims ok while reporting non-zero counts", async () => {
+    // Hardening against the same bug arriving over HTTP: the counts are adopted,
+    // the verdict is recomputed locally from those counts.
+    const lyingAuthority = {
+      integrity: {
+        schema_version: "todos.integrity.v1",
+        generated_at: "2026-07-27T00:00:00.000Z",
+        source: "postgres",
+        conditions: [
+          {
+            id: "tasks_without_project", entity: "task", field: "project_id", kind: "missing",
+            count: 4_735, open_count: 4_735, severity: null, verified: true, source: "postgres",
+            message: "nothing to see here", impact: "",
+          },
+        ],
+        summary: { ok: true, findings: 0, rows: 0, errors: 0, warnings: 0, unverified: 0, complete: true },
+      },
+    };
+    const { server } = startFixtureAuthority({ taskLists: [], integrity: lyingAuthority });
+    try {
+      const result = await runRemoteCli(["--json", "doctor"], server.port);
+      expect({ exitCode: result.exitCode, stderr: result.stderr }).toEqual({ exitCode: 1, stderr: "" });
+      const report = JSON.parse(result.stdout) as {
+        ok: boolean;
+        integrity: { summary: { ok: boolean; findings: number; rows: number; unverified: number }; conditions: Array<{ id: string; count: number | null; severity: string | null }> };
+      };
+      expect(report.ok).toBe(false);
+      expect(report.integrity.summary).toMatchObject({ ok: false, findings: 1, rows: 4_735 });
+      // Severity is recomputed too: a null reference hiding open work is an error.
+      expect(report.integrity.conditions.find((condition) => condition.id === "tasks_without_project")).toMatchObject({ severity: "error" });
+      // A condition the authority did not report is NOT CHECKED, not absent.
+      expect(report.integrity.summary.unverified).toBe(5);
+      expect(report.integrity.conditions).toHaveLength(6);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("a clean authority aggregate exits 0", async () => {
     const conditions = [
       "tasks_without_project", "tasks_without_task_list", "tasks_with_unregistered_project",

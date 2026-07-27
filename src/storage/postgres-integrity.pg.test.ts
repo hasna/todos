@@ -5,8 +5,10 @@
  * authority is Postgres, and Postgres mode is NOT relational: every entity is a
  * jsonb payload in one `todos_sync_records` table with NO foreign keys, so the
  * orphan classes SQLite forbids structurally are exactly the ones that accumulate
- * in production. A check implemented only for SQLite would report healthy there —
- * the sibling failure mode that left the audit log almost empty in production.
+ * in production. A check implemented for one engine only reports healthy on the
+ * other, and here the engine it would report healthy on is the one that actually
+ * holds the rows. Neither plane is the reference implementation: both are asserted
+ * against the shared condition spec, not against each other.
  *
  * Guarded by TODOS_TEST_PG_URL so the default no-Postgres lane skips it:
  *   TODOS_TEST_PG_URL=postgres://postgres@127.0.0.1:5432/todos_pg_test?sslmode=disable \

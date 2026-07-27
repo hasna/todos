@@ -2185,6 +2185,7 @@ export { runTodosDoctor } from "./lib/doctor.js";
 export {
   INTEGRITY_CONDITIONS,
   OPEN_TASK_STATUSES,
+  adoptRemoteIntegrityReport,
   TODOS_INTEGRITY_SCHEMA_VERSION,
   buildIntegrityReport,
   buildPostgresIntegritySql,

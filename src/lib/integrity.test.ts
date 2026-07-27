@@ -20,6 +20,7 @@ import { runTodosDoctor } from "./doctor.js";
 import {
   INTEGRITY_CONDITIONS,
   OPEN_TASK_STATUSES,
+  adoptRemoteIntegrityReport,
   buildIntegrityReport,
   buildPostgresIntegritySql,
   buildSqliteIntegritySql,
@@ -304,6 +305,43 @@ describe("local doctor verdict", () => {
     expect(report.summary).toMatchObject({ ok: false, complete: false });
     expect(report.conditions.every((condition) => condition.count === null)).toBe(true);
     expect(report.conditions[0]!.unverified_reason).toContain("task_lists");
+  });
+});
+
+describe("adopting a report from another process", () => {
+  test("recomputes the verdict from the counts and ignores a claimed summary", () => {
+    const adopted = adoptRemoteIntegrityReport({
+      generated_at: "2026-07-27T00:00:00.000Z",
+      source: "postgres",
+      conditions: [
+        { id: "tasks_without_project", count: 10_176, open_count: 4_735, verified: true, severity: null },
+      ],
+      // A lie that used to be believed verbatim.
+      summary: { ok: true, findings: 0, rows: 0, errors: 0, warnings: 0, unverified: 0, complete: true },
+    } as never, "2026-07-27T00:00:00.000Z");
+
+    expect(adopted.summary).toMatchObject({ ok: false, findings: 1, rows: 10_176, errors: 1 });
+    expect(adopted.source).toBe("postgres");
+    // Missing conditions become unverified rather than shrinking the checked set.
+    expect(adopted.conditions).toHaveLength(INTEGRITY_CONDITIONS.length);
+    expect(adopted.summary.unverified).toBe(INTEGRITY_CONDITIONS.length - 1);
+    expect(adopted.conditions.find((condition) => condition.id === "task_lists_without_project"))
+      .toMatchObject({ count: null, verified: false });
+  });
+
+  test("rejects an unusable count and an unknown condition id", () => {
+    const adopted = adoptRemoteIntegrityReport({
+      conditions: [
+        { id: "tasks_without_project", count: "many", verified: true },
+        { id: "tasks_without_task_list", count: 3, verified: false, unverified_reason: "backend timeout" },
+        { id: "a_condition_this_build_does_not_know", count: 99, verified: true },
+      ],
+    } as never, "2026-07-27T00:00:00.000Z");
+
+    expect(adopted.summary).toMatchObject({ ok: false, findings: 0, unverified: INTEGRITY_CONDITIONS.length });
+    expect(adopted.conditions.map((condition) => condition.id)).toEqual(INTEGRITY_CONDITIONS.map((spec) => spec.id));
+    expect(adopted.conditions.find((condition) => condition.id === "tasks_without_task_list")?.unverified_reason)
+      .toBe("backend timeout");
   });
 });
 
