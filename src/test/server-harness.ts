@@ -35,10 +35,11 @@ const REPO_ROOT = join(import.meta.dir, "..", "..");
 /**
  * Emitted by `startServer` in src/server/serve.ts once the socket is bound.
  *
- * Anchored on a trailing newline so a chunk boundary landing mid-port cannot
- * match a truncated prefix and hand back a wrong port. In practice the line is
- * a single 49-byte write and arrives whole, but the anchor makes that a
- * guarantee rather than a property of the current buffer size.
+ * Anchored on trailing whitespace so a chunk boundary landing mid-port cannot
+ * match a truncated prefix and hand back a wrong port (unanchored, a split after
+ * "…localhost:19" would have announced port 19). In practice the line arrives
+ * whole as one small write terminated by the newline `console.log` appends, but
+ * the anchor makes that a guarantee rather than a property of the buffer size.
  */
 const READY_LINE = /Todos Dashboard running at http:\/\/localhost:(\d+)\s/;
 
@@ -71,7 +72,12 @@ export const SERVER_START_BUDGET_MS = 60_000;
  */
 export const SERVER_HOOK_BUDGET_MS = SERVER_START_BUDGET_MS + 30_000;
 
-/** Shutdown is a signal plus process reap — bounded by the same reasoning. */
+/**
+ * Budget for the `afterAll` hook. Unlike startup there is no internal timer to
+ * out-wait here — `stop()` is a signal plus a process reap — so this is purely
+ * the hook bound, sized to cover a reap plus the temp-directory cleanup that
+ * every suite does alongside it.
+ */
 export const SERVER_STOP_BUDGET_MS = 30_000;
 
 export interface TestServerOptions {
@@ -176,8 +182,12 @@ export async function startTestServer(options: TestServerOptions = {}): Promise<
   try {
     port = await Promise.race([announced, crashed, expired]);
   } catch (error) {
-    proc.kill();
-    await proc.exited;
+    // SIGKILL, not SIGTERM, and do NOT await the reap. The budget is only ever
+    // reached when the child is wedged without exiting, and the server's SIGTERM
+    // handler needs a working event loop to run — so awaiting `proc.exited` here
+    // would hang past the hook budget and throw away this error, which is the
+    // very diagnostic the budget exists to produce.
+    proc.kill("SIGKILL");
     throw error;
   } finally {
     if (expire) clearTimeout(expire);
