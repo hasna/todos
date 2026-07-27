@@ -25,23 +25,36 @@ import { searchTasks } from "../../lib/search.js";
 import {
   deleteSearchView,
   listSearchViews,
-  normalizeScope,
   runSavedSearch,
   runSearchView,
   saveSearchView,
+  SAVED_SEARCH_SCOPES,
   type SavedSearchFilters,
   type SavedSearchScope,
 } from "../../lib/saved-search-views.js";
 import { defaultSyncAgents, syncWithAgent, syncWithAgents } from "../../lib/sync.js";
 import { getAgentTaskListId } from "../../lib/config.js";
-import { autoProject, autoDetectProject, handleError, output, formatTaskLine, normalizeStatus, resolveExplicitProject, resolveTaskId, resolveTaskIdForCommand } from "../helpers.js";
+import { autoProject, autoDetectProject, handleError, output, outputRecord, formatTaskLine, parseEnumFlag, parseEnumFlagList, resolveExplicitProject, resolveTaskId, resolveTaskIdForCommand, TASK_PRIORITY_FLAG, TASK_STATUS_FLAG } from "../helpers.js";
 import { redactBroadOutput, redactBroadTasks } from "../output-redaction.js";
 
 function collectOption(value: string, previous: string[] = []): string[] {
   return [...previous, value];
 }
 
-/** The resolved hosted /v1 client, when a remote authority is selected. */
+/**
+ * `--scope` vocabulary, taken from `SAVED_SEARCH_SCOPES`. `normalizeScope` silently
+ * falls back to "tasks" for anything it does not recognise, so a mistyped
+ * `--scope projekts` used to search tasks and report those results as if they were
+ * the requested scope. Validating the flag first turns that into a non-zero error.
+ */
+const SEARCH_SCOPE_FLAG = {
+  name: "--scope",
+  vocabulary: SAVED_SEARCH_SCOPES,
+  normalize: (value: string) => value.toLowerCase().trim(),
+  allowList: false,
+} as const;
+
+/** The resolved cloud/self-hosted client, when a remote authority is selected. */
 type CloudClient = NonNullable<ReturnType<typeof getTodosCloudClient>>;
 
 /** Bounded concurrency for per-task edge reads while assembling a cloud graph. */
@@ -200,12 +213,15 @@ function buildSearchFilters(query: string | undefined, opts: any, projectId?: st
   const customFields = parseJsonObjectOption(opts.fieldCustom, "--field-custom");
   const labels = splitList(opts.fieldLabel);
   const tags = splitList(opts.tag);
-  const statuses = splitList(opts.status)?.map(normalizeStatus);
+  // Validated against TASK_STATUSES / TASK_PRIORITIES before they can reach the
+  // search filter. Unvalidated they matched nothing and `search` printed
+  // `No tasks matching "<query>".` with exit 0 — the same silent empty result the
+  // `list --status open` incident produced.
   const filters: SavedSearchFilters = {
     query: query || opts.query,
     project_id: opts.allProjects ? undefined : projectId,
-    status: statuses,
-    priority: splitList(opts.priority) as SavedSearchFilters["priority"],
+    status: parseEnumFlagList(opts.status, TASK_STATUS_FLAG),
+    priority: parseEnumFlagList(opts.priority, TASK_PRIORITY_FLAG),
     assigned_to: opts.assigned,
     agent_id: opts.agentId,
     task_list_id: filterPatch?.task_list_id === undefined
@@ -367,7 +383,7 @@ export function registerProjectCommands(program: Command) {
           : cloud
             ? undefined
             : autoProject(globalOpts);
-        const scope = normalizeScope(opts.scope) as SavedSearchScope;
+        const scope = (parseEnumFlag(opts.scope, SEARCH_SCOPE_FLAG) ?? "tasks") as SavedSearchScope;
         const searchOpts = buildSearchFilters(query, opts, projectId);
         if (opts.saveAs) {
           const view = saveSearchView({
@@ -490,7 +506,7 @@ export function registerProjectCommands(program: Command) {
         const view = saveSearchView({
           name,
           description: opts.description,
-          scope: normalizeScope(opts.scope),
+          scope: (parseEnumFlag(opts.scope, SEARCH_SCOPE_FLAG) ?? "tasks") as SavedSearchScope,
           filters: buildSearchFilters(opts.query, opts, projectId),
         });
         output(view, Boolean(globalOpts.json));
@@ -507,7 +523,7 @@ export function registerProjectCommands(program: Command) {
     .action((opts) => {
       const globalOpts = program.opts();
       try {
-        const rows = listSearchViews(opts.scope ? normalizeScope(opts.scope) : undefined);
+        const rows = listSearchViews(parseEnumFlag(opts.scope, SEARCH_SCOPE_FLAG) as SavedSearchScope | undefined);
         output(rows, Boolean(globalOpts.json));
         if (!globalOpts.json) {
           if (rows.length === 0) {
@@ -759,7 +775,9 @@ export function registerProjectCommands(program: Command) {
 
       if (opts.show) {
         const project = cloud ? await cloudResolveProject(cloud, opts.show) : resolveExplicitProject(opts.show);
-        output(project, Boolean(globalOpts.json));
+        // outputRecord, not output: `output` prints only under --json, so this
+        // read used to exit 0 with completely empty stdout in human mode.
+        outputRecord(project, Boolean(globalOpts.json), "Project:");
         return;
       }
 
@@ -776,7 +794,9 @@ export function registerProjectCommands(program: Command) {
         const project = cloud
           ? await cloudUpdateProject(cloud, current.id, patch)
           : updateProject(current.id, patch);
-        output(project, Boolean(globalOpts.json));
+        // A successful mutation must say so: this printed nothing at all in human
+        // mode, so the operator had no signal the write had landed.
+        outputRecord(project, Boolean(globalOpts.json), "Project updated:");
         return;
       }
 
