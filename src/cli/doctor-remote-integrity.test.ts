@@ -35,6 +35,15 @@ interface FixtureOptions {
   tasks?: Array<{ id: string; status: string; project_id: string | null; task_list_id: string | null }>;
   /** When set, the authority exposes GET /v1/integrity and returns this body. */
   integrity?: unknown;
+  /**
+   * Transport-level answer from GET /v1/integrity, instead of a body.
+   *
+   * Separates two cases doctor must NOT conflate: a route that is ABSENT
+   * (404/501 — cannot measure, so the conditions are UNVERIFIED) from a route
+   * that is PRESENT BUT BROKEN (500/malformed — a hard error). A broken
+   * aggregate is not evidence of health.
+   */
+  integrityTransport?: "500" | "501" | "malformed" | "empty";
 }
 
 function startFixtureAuthority(options: FixtureOptions): { server: ReturnType<typeof Bun.serve>; requests: string[] } {
@@ -53,6 +62,13 @@ function startFixtureAuthority(options: FixtureOptions): { server: ReturnType<ty
       if (url.pathname === "/v1/task-lists") return Response.json({ task_lists: options.taskLists, count: options.taskLists.length });
       if (url.pathname === "/v1/plans") return Response.json({ plans: [], count: 0 });
       if (url.pathname === "/v1/integrity") {
+        switch (options.integrityTransport) {
+          case "500": return Response.json({ error: "internal" }, { status: 500 });
+          case "501": return Response.json({ error: "not implemented" }, { status: 501 });
+          case "malformed": return Response.json({ unexpected: "no conditions array here" });
+          case "empty": return new Response("", { status: 200 });
+          default: break;
+        }
         if (options.integrity === undefined) return Response.json({ error: "unknown /v1 resource: integrity" }, { status: 404 });
         return Response.json(options.integrity);
       }
@@ -346,6 +362,82 @@ describe("todos doctor against a remote /v1 authority", () => {
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("REMOTE_COMMAND_UNSUPPORTED");
       expect(requests).toEqual([]);
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
+/**
+ * A BROKEN `/v1/integrity` must never read as healthy.
+ *
+ * Every fixture here serves an otherwise CLEAN dataset — one bound task list, no
+ * orphans — so a non-zero exit can only come from how the aggregate route failed,
+ * never from findings. That is the whole point: on the unfixed source a clean
+ * dataset exited 0 regardless, and the failure mode this batch exists to kill is a
+ * check that reports success because it never actually ran.
+ *
+ * The distinction the assertions pin:
+ *   - ABSENT route (404/501)      -> conditions UNVERIFIED, exit 2 (incomplete)
+ *   - PRESENT but broken (500)    -> hard error, exit 1, no verdict printed
+ *   - PRESENT but unparseable     -> hard error, exit 1, no verdict printed
+ */
+describe("todos doctor: a broken GET /v1/integrity never reads as clean", () => {
+  const CLEAN_LISTS = [{ id: LIST_BOUND, name: "Bound", slug: "bound", project_id: PROJECT_ID }];
+
+  test("501 Not Implemented is an ABSENT route: exit 2 with conditions UNVERIFIED, not exit 0", async () => {
+    const { server, requests } = startFixtureAuthority({ taskLists: CLEAN_LISTS, integrityTransport: "501" });
+    try {
+      const result = await runRemoteCli(["doctor"], server.port);
+
+      expect({ exitCode: result.exitCode, stderr: result.stderr }).toEqual({ exitCode: 2, stderr: "" });
+      expect(result.stdout).toContain("INCOMPLETE");
+      for (const id of ["tasks_without_project", "tasks_without_task_list", "tasks_with_unregistered_project", "tasks_with_unregistered_task_list"]) {
+        expect(result.stdout).toMatch(new RegExp(`${id} NOT CHECKED`));
+      }
+      expect(requests).toContain("GET /v1/integrity");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("500 from the aggregate is a HARD ERROR, not a clean or incomplete verdict", async () => {
+    const { server } = startFixtureAuthority({ taskLists: CLEAN_LISTS, integrityTransport: "500" });
+    try {
+      const result = await runRemoteCli(["doctor"], server.port);
+
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain("REMOTE_API_UNAVAILABLE");
+      expect(result.stderr).toContain("/integrity");
+      // A transport error must not be dressed up as a verdict about the data.
+      expect(result.stdout).not.toContain("Integrity clean");
+      expect(result.stdout).not.toContain("INCOMPLETE");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a 200 body with no condition breakdown is a HARD ERROR, not an empty clean report", async () => {
+    const { server } = startFixtureAuthority({ taskLists: CLEAN_LISTS, integrityTransport: "malformed" });
+    try {
+      const result = await runRemoteCli(["doctor"], server.port);
+
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain("REMOTE_API_INCOMPATIBLE");
+      expect(result.stdout).not.toContain("Integrity clean");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("an empty 200 body is a HARD ERROR, not an empty clean report", async () => {
+    const { server } = startFixtureAuthority({ taskLists: CLEAN_LISTS, integrityTransport: "empty" });
+    try {
+      const result = await runRemoteCli(["doctor"], server.port);
+
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain("REMOTE_API_INCOMPATIBLE");
+      expect(result.stdout).not.toContain("Integrity clean");
     } finally {
       server.stop(true);
     }
