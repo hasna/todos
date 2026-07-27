@@ -30,6 +30,11 @@
  * runner several times more contended than the measured box still passes. This is
  * a ceiling for detecting a hang, not a target — a healthy spawn returns as soon
  * as the CLI exits, so headroom costs nothing on green runs.
+ *
+ * The ~3x factor here is smaller than the ~8x in server-harness.ts's
+ * SERVER_START_BUDGET_MS on purpose: this allowance is multiplied by a spawn
+ * count, so the margin compounds with the workload, whereas the server budget is
+ * a single flat ceiling that has to absorb the whole of one cold start.
  */
 const COLD_CLI_SPAWN_ALLOWANCE_MS = 24_000;
 
@@ -46,4 +51,32 @@ export function cliSpawnBudgetMs(spawns: number): number {
     throw new Error(`cliSpawnBudgetMs expects a positive spawn count, got ${spawns}`);
   }
   return spawns * COLD_CLI_SPAWN_ALLOWANCE_MS + TEST_BODY_OVERHEAD_MS;
+}
+
+/**
+ * Per-invocation allowance for a PRE-BUILT CLI bundle, which skips the transpile
+ * a `bun run src/cli/index.tsx` spawn pays and is therefore much cheaper.
+ *
+ * Measured on GitHub `ubuntu-latest` across two consecutive runs of the Stage-A
+ * sweep over all 122 local-only commands: 37,831ms and 42,972ms total, i.e.
+ * 310ms and 352ms per invocation. Set to ~4x the worse of the two so a slower
+ * runner still passes.
+ */
+const BUILT_CLI_SPAWN_ALLOWANCE_MS = 1_500;
+
+/**
+ * Budget for a test that invokes the pre-built CLI `spawns` times in sequence.
+ *
+ * Prefer passing a count derived from the source of truth that drives the loop
+ * (e.g. the size of the CLI capability matrix) rather than a literal, so the
+ * budget grows with the workload instead of silently tightening as commands are
+ * added.
+ *
+ * @param spawns how many times the test invokes the built CLI, in sequence
+ */
+export function builtCliSpawnBudgetMs(spawns: number): number {
+  if (!Number.isInteger(spawns) || spawns < 1) {
+    throw new Error(`builtCliSpawnBudgetMs expects a positive spawn count, got ${spawns}`);
+  }
+  return spawns * BUILT_CLI_SPAWN_ALLOWANCE_MS + TEST_BODY_OVERHEAD_MS;
 }

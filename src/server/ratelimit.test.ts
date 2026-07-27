@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  SERVER_START_BUDGET_MS,
+  SERVER_HOOK_BUDGET_MS,
   SERVER_STOP_BUDGET_MS,
   startTestServer,
   type TestServer,
@@ -29,10 +29,10 @@ beforeAll(async () => {
   tmpDir = await mkdtemp(join(tmpdir(), "todos-ratelimit-test-"));
   dbPath = join(tmpDir, "test.db");
 
-  // Readiness comes from the server's own ready line, not from polling /health:
-  // with TODOS_RATE_LIMIT_MAX=5 the old poll loop spent this suite's entire rate
-  // budget probing liveness (it even treated a 429 as "up"), so the assertion
-  // below started from an unknown number of consumed tokens.
+  // Readiness comes from the server's own ready line rather than by polling
+  // /health, which keeps liveness probing out of the budget this suite asserts
+  // on: with TODOS_RATE_LIMIT_MAX=5, every probe request that reached the server
+  // spent one of the 5 tokens the assertion below depends on.
   server = await startTestServer({
     // `--allow-anonymous` keeps this suite focused on route behavior: the server
     // now fails closed when no credential is configured, and auth itself is covered
@@ -46,7 +46,7 @@ beforeAll(async () => {
       TODOS_TRUST_PROXY: "0",
     },
   });
-}, SERVER_START_BUDGET_MS);
+}, SERVER_HOOK_BUDGET_MS);
 
 afterAll(async () => {
   await server?.stop();

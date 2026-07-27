@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  SERVER_START_BUDGET_MS,
+  SERVER_HOOK_BUDGET_MS,
   SERVER_STOP_BUDGET_MS,
   startTestServer,
   type TestServer,
@@ -50,7 +50,7 @@ beforeAll(async () => {
     args: ["--allow-anonymous"],
     env: { TODOS_DB_PATH: dbPath, TODOS_AUTO_PROJECT: "false" },
   });
-}, SERVER_START_BUDGET_MS);
+}, SERVER_HOOK_BUDGET_MS);
 
 afterAll(async () => {
   await server?.stop();

@@ -7,8 +7,7 @@
  */
 
 import { getPackageVersion } from "../lib/package-version.js";
-
-const DEFAULT_PORT = 19427;
+import { DEFAULT_PORT, coercePort, findFreePort } from "./port.js";
 
 function hasVersionFlag(): boolean {
   return process.argv.includes("--version") || process.argv.includes("-V");
@@ -44,21 +43,6 @@ Environment:
   TODOS_API_KEY=<key>      Require this API key for dashboard/API requests`);
 }
 
-/**
- * `0` is a MEANINGFUL port: it asks the kernel for an ephemeral one. Parsing it
- * with `parseInt(...) || DEFAULT_PORT` silently rewrote `--port=0` to
- * ${DEFAULT_PORT}, which made "let the OS pick a free port" impossible to
- * request — the reason subprocess tests had to guess ports out of hardcoded
- * ranges and race each other for them. Only reject values that are not a valid
- * port at all.
- */
-function coercePort(raw: string | undefined): number | undefined {
-  if (raw === undefined) return undefined;
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65535) return undefined;
-  return parsed;
-}
-
 function parsePort(): number {
   const portArg = process.argv.find((a) => a === "--port" || a.startsWith("--port="));
   if (portArg) {
@@ -79,18 +63,6 @@ function parseStringArg(name: string): string | undefined {
   return process.argv[idx + 1] || undefined;
 }
 
-async function findFreePort(start: number): Promise<number> {
-  for (let port = start; port < start + 100; port++) {
-    try {
-      const server = Bun.serve({ port, fetch: () => new Response("") });
-      server.stop(true);
-      return port;
-    } catch {
-      // Port in use, try next
-    }
-  }
-  return start; // fallback
-}
 
 async function runMigrate(): Promise<void> {
   const {

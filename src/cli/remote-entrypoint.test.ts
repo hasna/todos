@@ -9,8 +9,23 @@ import {
   type TodosCliAuthorityInitialization,
 } from "./stage-a.js";
 import { resetTodosCloudClient } from "./cloud-router.js";
+import { builtCliSpawnBudgetMs } from "../test/spawn-budget.js";
 
 const REPO_ROOT = join(import.meta.dir, "../..");
+
+/**
+ * The Stage-A sweep below invokes the built CLI once per local-only command, so
+ * its cost scales with the capability matrix — 122 local-only commands today.
+ * Pinning that test to a literal 45_000ms meant every command added to the matrix
+ * silently tightened it: measured on CI at ~310-352ms per invocation, two
+ * consecutive runs took 37,831ms and 42,972ms, the second within 2.0s of the
+ * ceiling, leaving roughly six commands of headroom. Nothing flagged the drift
+ * because the test's own floor assertion (>= 97) was 25 commands behind reality.
+ * Derive the budget from the matrix so it grows with the work it has to do.
+ */
+const LOCAL_ONLY_COMMAND_COUNT = [...getTodosCliCommandCapabilityMatrix()].filter(
+  ([, owner]) => owner === "local-only",
+).length;
 const TASK_FIXTURE_ID = "11111111-1111-4111-8111-111111111111";
 const OTHER_TASK_FIXTURE_ID = "22222222-2222-4222-8222-222222222222";
 const tempRoots: string[] = [];
@@ -387,6 +402,7 @@ describe("remote CLI entrypoint authority boundary", () => {
         .map(([command]) => command)
         .sort();
       expect(localOnly.length).toBeGreaterThanOrEqual(97);
+      expect(localOnly.length).toBe(LOCAL_ONLY_COMMAND_COUNT);
       for (const command of localOnly) {
         const result = await runCli(executable, [command], env, cwd);
         expect({ command, exitCode: result.exitCode }).toEqual({ command, exitCode: 1 });
@@ -398,7 +414,7 @@ describe("remote CLI entrypoint authority boundary", () => {
     } finally {
       server.stop(true);
     }
-  }, 45_000);
+  }, builtCliSpawnBudgetMs(LOCAL_ONLY_COMMAND_COUNT));
 
   test("built help and manual advertise only remote-executable commands", async () => {
     const env = {

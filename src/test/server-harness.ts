@@ -32,8 +32,15 @@ import { localRoutingTestEnv } from "./local-routing-env.fixture.test.js";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 
-/** Emitted by `startServer` in src/server/serve.ts once the socket is bound. */
-const READY_LINE = /Todos Dashboard running at http:\/\/localhost:(\d+)/;
+/**
+ * Emitted by `startServer` in src/server/serve.ts once the socket is bound.
+ *
+ * Anchored on a trailing newline so a chunk boundary landing mid-port cannot
+ * match a truncated prefix and hand back a wrong port. In practice the line is
+ * a single 49-byte write and arrives whole, but the anchor makes that a
+ * guarantee rather than a property of the current buffer size.
+ */
+const READY_LINE = /Todos Dashboard running at http:\/\/localhost:(\d+)\s/;
 
 /**
  * Time allowed for a cold `bun run src/server/index.ts` to reach its ready line.
@@ -49,6 +56,20 @@ const READY_LINE = /Todos Dashboard running at http:\/\/localhost:(\d+)/;
  * hangs without either succeeding or exiting.
  */
 export const SERVER_START_BUDGET_MS = 60_000;
+
+/**
+ * Budget for the `beforeAll` HOOK that calls startTestServer — deliberately
+ * LARGER than SERVER_START_BUDGET_MS.
+ *
+ * If the two were equal, bun's hook clock would always win: it starts at hook
+ * entry, while the harness timer starts later (after mkdtemp, and in
+ * auth.test.ts after seeding an API key, which runs migrations). The harness
+ * would then be killed mid-flight and the failure would surface as a bare
+ * "hook timed out" with none of the stdout/stderr this harness exists to
+ * surface — the exact diagnostic it replaced polling to provide. The margin
+ * covers that pre-spawn setup so the harness's own error is the one that fires.
+ */
+export const SERVER_HOOK_BUDGET_MS = SERVER_START_BUDGET_MS + 30_000;
 
 /** Shutdown is a signal plus process reap — bounded by the same reasoning. */
 export const SERVER_STOP_BUDGET_MS = 30_000;

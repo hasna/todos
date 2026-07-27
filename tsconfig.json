@@ -30,7 +30,8 @@
     "src/storage.ts",
     "src/server/index.ts",
     "src/sdk/index.ts",
-    "src/sdk/**/*.ts"
+    "src/sdk/**/*.ts",
+    "src/test/**/*.ts"
   ],
   "exclude": ["node_modules", "dist", "**/*.test.ts"]
 }

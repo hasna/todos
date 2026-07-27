@@ -1172,17 +1172,14 @@ export function registerConfigServeCommands(program: Command) {
     .option("--no-open", "Don't open browser automatically")
     .action(async (opts) => {
       const { startServer } = await import("../../server/serve.js");
-      const requestedPort = parseInt(opts.port, 10);
-      let port = requestedPort;
-      // Auto-find free port if default is in use
-      for (let p = requestedPort; p < requestedPort + 100; p++) {
-        try {
-          const s = Bun.serve({ port: p, fetch: () => new Response("") });
-          s.stop(true);
-          port = p;
-          break;
-        } catch { /* port in use */ }
-      }
+      const { DEFAULT_PORT, coercePort, findFreePort } = await import("../../server/port.js");
+      // Shared with the standalone todos-serve entry point. This used to be its
+      // own `parseInt(opts.port, 10)` plus a duplicate scan loop, so an
+      // unparseable --port produced NaN, skipped the loop entirely, and reached
+      // Bun.serve as NaN — which silently binds a random ephemeral port.
+      const requestedPort = coercePort(opts.port) ?? DEFAULT_PORT;
+      // 0 means "kernel, pick one": bind it as asked rather than scanning.
+      const port = requestedPort === 0 ? requestedPort : await findFreePort(requestedPort);
       if (port !== requestedPort) {
         console.log(`Port ${requestedPort} in use, using ${port}`);
       }
