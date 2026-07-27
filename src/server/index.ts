@@ -44,14 +44,29 @@ Environment:
   TODOS_API_KEY=<key>      Require this API key for dashboard/API requests`);
 }
 
+/**
+ * `0` is a MEANINGFUL port: it asks the kernel for an ephemeral one. Parsing it
+ * with `parseInt(...) || DEFAULT_PORT` silently rewrote `--port=0` to
+ * ${DEFAULT_PORT}, which made "let the OS pick a free port" impossible to
+ * request — the reason subprocess tests had to guess ports out of hardcoded
+ * ranges and race each other for them. Only reject values that are not a valid
+ * port at all.
+ */
+function coercePort(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65535) return undefined;
+  return parsed;
+}
+
 function parsePort(): number {
   const portArg = process.argv.find((a) => a === "--port" || a.startsWith("--port="));
   if (portArg) {
     if (portArg.includes("=")) {
-      return parseInt(portArg.split("=")[1]!, 10) || DEFAULT_PORT;
+      return coercePort(portArg.split("=")[1]) ?? DEFAULT_PORT;
     }
     const idx = process.argv.indexOf(portArg);
-    return parseInt(process.argv[idx + 1]!, 10) || DEFAULT_PORT;
+    return coercePort(process.argv[idx + 1]) ?? DEFAULT_PORT;
   }
   return DEFAULT_PORT;
 }
@@ -189,9 +204,11 @@ async function main() {
   // When PORT is set (container/service deployment) bind it EXACTLY — never scan
   // for a free port, or the ALB health check would target the wrong port.
   const explicitPortArg = process.argv.some((a) => a === "--port" || a.startsWith("--port="));
-  const envPort = process.env.PORT ? parseInt(process.env.PORT, 10) : undefined;
+  const envPort = coercePort(process.env.PORT);
   const requestedPort = explicitPortArg ? parsePort() : (envPort ?? parsePort());
-  const port = envPort || explicitPortArg ? requestedPort : await findFreePort(requestedPort);
+  // An explicitly requested port (including 0 = "kernel, pick one") is bound as
+  // asked. Only the implicit default may scan for a free port.
+  const port = envPort !== undefined || explicitPortArg ? requestedPort : await findFreePort(requestedPort);
   if (port !== requestedPort) {
     console.log(`Port ${requestedPort} in use, using ${port}`);
   }
