@@ -14,14 +14,24 @@ import { builtCliSpawnBudgetMs } from "../test/spawn-budget.js";
 const REPO_ROOT = join(import.meta.dir, "../..");
 
 /**
- * The Stage-A sweep below invokes the built CLI once per local-only command, so
- * its cost scales with the capability matrix — 122 local-only commands today.
- * Pinning that test to a literal 45_000ms meant every command added to the matrix
- * silently tightened it: measured on CI at ~310-352ms per invocation, two
- * consecutive runs took 37,831ms and 42,972ms, the second within 2.0s of the
- * ceiling, leaving roughly six commands of headroom. Nothing flagged the drift
- * because the test's own floor assertion (>= 97) was 25 commands behind reality.
- * Derive the budget from the matrix so it grows with the work it has to do.
+ * Exact number of local-only commands in the Stage-A capability matrix.
+ *
+ * This is deliberately an exact literal, not a `>=` floor. The floor it replaces
+ * (`>= 97`, in two places) had drifted 25 commands behind reality, which is how
+ * the Stage-A sweep's frozen 45_000ms timeout went unnoticed as it tightened: the
+ * sweep invokes the built CLI once per local-only command, so at the ~310-352ms
+ * per invocation measured on CI, two consecutive runs took 37,831ms and 42,972ms
+ * — the second within 2.0s of failing, with about six commands of headroom left.
+ * An exact count fails loudly the moment a command is reclassified in either
+ * direction, forcing a deliberate update here instead of silent erosion.
+ */
+const EXPECTED_LOCAL_ONLY_COMMANDS = 122;
+
+/**
+ * Budget for the Stage-A sweep, derived from the matrix that drives its workload
+ * so it grows with the work rather than needing to be re-guessed. Read from the
+ * live matrix rather than the constant above so the budget stays correct even
+ * when the count assertion is the thing that is failing.
  */
 const LOCAL_ONLY_COMMAND_COUNT = [...getTodosCliCommandCapabilityMatrix()].filter(
   ([, owner]) => owner === "local-only",
@@ -151,7 +161,7 @@ describe("remote CLI entrypoint authority boundary", () => {
     const registered = [...registeredCliNames()].sort();
     const matrix = getTodosCliCommandCapabilityMatrix();
     expect([...matrix.keys()].sort()).toEqual(registered);
-    expect([...matrix.values()].filter((owner) => owner === "local-only").length).toBeGreaterThanOrEqual(97);
+    expect([...matrix.values()].filter((owner) => owner === "local-only").length).toBe(EXPECTED_LOCAL_ONLY_COMMANDS);
     expect([...matrix.values()].every((owner) => ["diagnostic", "remote-http", "local-only"].includes(owner))).toBe(true);
   });
 
@@ -401,8 +411,7 @@ describe("remote CLI entrypoint authority boundary", () => {
         .filter(([, owner]) => owner === "local-only")
         .map(([command]) => command)
         .sort();
-      expect(localOnly.length).toBeGreaterThanOrEqual(97);
-      expect(localOnly.length).toBe(LOCAL_ONLY_COMMAND_COUNT);
+      expect(localOnly.length).toBe(EXPECTED_LOCAL_ONLY_COMMANDS);
       for (const command of localOnly) {
         const result = await runCli(executable, [command], env, cwd);
         expect({ command, exitCode: result.exitCode }).toEqual({ command, exitCode: 1 });
