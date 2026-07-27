@@ -54,6 +54,20 @@ const SEARCH_SCOPE_FLAG = {
   allowList: false,
 } as const;
 
+/**
+ * `todos export --format` vocabulary, including the documented spelling variants
+ * the action already accepts. An unrecognised value used to fall through the
+ * markdown branch and silently emit JSON, so `--format mardown` produced a
+ * plausible-looking export in the wrong format with exit 0.
+ */
+const EXPORT_FORMATS = ["json", "md", "markdown", "todos.md", "todos-md", "bridge"] as const;
+const EXPORT_FORMAT_FLAG = {
+  name: "--format",
+  vocabulary: EXPORT_FORMATS,
+  normalize: (value: string) => value.toLowerCase().trim(),
+  allowList: false,
+} as const;
+
 /** The resolved cloud/self-hosted client, when a remote authority is selected. */
 type CloudClient = NonNullable<ReturnType<typeof getTodosCloudClient>>;
 
@@ -1177,6 +1191,9 @@ export function registerProjectCommands(program: Command) {
     .action(async (opts) => {
       const { listTasks } = await import("../../db/tasks.js");
       const globalOpts = program.opts();
+      // Validate before any branch: an unknown format used to reach the final
+      // `else` and emit JSON regardless of what was asked for.
+      opts.format = parseEnumFlag(opts.format, EXPORT_FORMAT_FLAG) ?? "json";
       const projectId = autoProject(globalOpts);
       const writeOutput = async (content: string) => {
         if (opts.output) {

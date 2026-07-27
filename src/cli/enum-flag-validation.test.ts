@@ -16,7 +16,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { localRoutingTestEnv } from "../test/local-routing-env.fixture.test.js";
-import { TASK_PRIORITIES, TASK_STATUSES } from "../types/index.js";
+import { DISPATCH_STATUSES, TASK_PRIORITIES, TASK_STATUSES } from "../types/index.js";
 
 // Every case here spawns a cold `bun run src/cli/index.tsx`, and the local-mode
 // cases spawn several in sequence. Match the budget cli.test.ts already sets.
@@ -329,6 +329,47 @@ describe("write flags reject out-of-vocabulary enums", () => {
     const result = await runLocal(["add", "Capitalised status", "--status", "In_Progress", "--json"], root);
     expect(result.exitCode).toBe(0);
     expect((JSON.parse(result.stdout) as { status: string }).status).toBe("in_progress");
+  });
+});
+
+describe("other closed-vocabulary filters found by the flag audit", () => {
+  test("dispatches --status rejects a value outside DISPATCH_STATUSES", async () => {
+    const root = tempRoot("todos-enum-dispatches-");
+    const result = await runLocal(["dispatches", "--status", "totally_bogus_value"], root);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).not.toContain("No dispatches found.");
+    for (const status of DISPATCH_STATUSES) expect(result.stderr).toContain(status);
+  });
+
+  test("dispatches --status still accepts a valid dispatch status", async () => {
+    const root = tempRoot("todos-enum-dispatches-ok-");
+    const result = await runLocal(["dispatches", "--status", "pending"], root);
+    expect(result.exitCode).toBe(0);
+  });
+
+  test("export --format rejects an unknown format instead of silently emitting JSON", async () => {
+    const root = tempRoot("todos-enum-export-");
+    await seedLocal(root);
+    const result = await runLocal(["export", "--format", "totally_bogus_value"], root);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout.trim()).toBe("");
+  });
+
+  test("export --format md still produces markdown, not JSON", async () => {
+    const root = tempRoot("todos-enum-export-md-");
+    await seedLocal(root);
+    const result = await runLocal(["export", "--format", "md"], root);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.startsWith("[")).toBe(false);
+    expect(result.stdout).toContain("schema: hasna.todos.md/v1");
+  });
+
+  test("export --format json still produces JSON", async () => {
+    const root = tempRoot("todos-enum-export-json-");
+    await seedLocal(root);
+    const result = await runLocal(["export", "--format", "json"], root);
+    expect(result.exitCode).toBe(0);
+    expect((JSON.parse(result.stdout) as unknown[]).length).toBe(2);
   });
 });
 
