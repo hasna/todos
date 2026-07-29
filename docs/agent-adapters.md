@@ -22,6 +22,7 @@ Register the local MCP server with supported agent clients:
 ```bash
 todos mcp --register codex --global
 todos mcp --register claude --global
+todos mcp --register cursor --global
 todos mcp --register gemini --global
 ```
 
