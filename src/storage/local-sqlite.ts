@@ -64,6 +64,15 @@ import {
 import { addComment, listComments } from "../db/comments.js";
 import { getDatabase } from "../db/database.js";
 import { scanSqliteIntegrity } from "../db/integrity.js";
+import {
+  createLocalCustomerSavedView,
+  deleteLocalCustomerSavedView,
+  executeLocalCustomerSavedView,
+  executeLocalCustomerSearch,
+  getLocalCustomerSavedView,
+  listLocalCustomerSavedViews,
+  updateLocalCustomerSavedView,
+} from "../lib/customer-search-local.js";
 import type { TodosStorageAdapter } from "./interfaces.js";
 import {
   exportSqliteTodosStorageSnapshot,
@@ -272,6 +281,17 @@ export function createLocalSqliteTodosStorageAdapter(
     },
     integrity: {
       report: () => scanSqliteIntegrity(database()),
+    },
+    customerSearch: {
+      execute: (input) => executeLocalCustomerSearch(input, database()),
+    },
+    customerSavedViews: {
+      create: (input) => createLocalCustomerSavedView(input, database()),
+      get: (ref) => getLocalCustomerSavedView(ref, database()),
+      list: (input) => listLocalCustomerSavedViews(input, database()),
+      update: (input) => updateLocalCustomerSavedView(input, database()),
+      execute: (input) => executeLocalCustomerSavedView(input, database()),
+      delete: (ref, expectedVersion) => deleteLocalCustomerSavedView(ref, expectedVersion, database()),
     },
     transaction: (fn) => {
       const tx = database().transaction(() => fn(adapter));

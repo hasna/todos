@@ -84,6 +84,91 @@ const planSchema = {
   },
 } as const;
 
+const customerSearchFiltersSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["projectIds", "taskListIds", "planIds", "agentIds", "statuses", "priorities", "tags", "changedAfter", "dueBefore"],
+  properties: {
+    projectIds: { type: "array", items: { type: "string" } },
+    taskListIds: { type: "array", items: { type: "string" } },
+    planIds: { type: "array", items: { type: "string" } },
+    agentIds: { type: "array", items: { type: "string" } },
+    statuses: { type: "array", items: { type: "string", enum: ["pending", "ready", "in_progress", "blocked", "completed", "failed", "cancelled"] } },
+    priorities: { type: "array", items: { type: "string", enum: ["low", "medium", "high", "critical"] } },
+    tags: { type: "array", items: { type: "string" } },
+    changedAfter: { type: "string", format: "date-time", nullable: true },
+    dueBefore: { type: "string", format: "date-time", nullable: true },
+  },
+} as const;
+
+const customerSearchRequestSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["query", "filters", "cursor", "limit"],
+  properties: {
+    query: { type: "string", minLength: 1, maxLength: 4096 },
+    filters: customerSearchFiltersSchema,
+    cursor: { type: "string", nullable: true },
+    limit: { type: "integer", minimum: 1, maximum: 500 },
+  },
+} as const;
+
+const customerTaskSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["id", "owner", "version", "createdAt", "updatedAt", "shortId", "title", "description", "status", "priority", "projectId", "taskListId", "planId", "parentTaskId", "assignedAgentId", "fingerprint", "tags", "acceptanceCriteria", "dueAt", "completedAt", "externalOwnerRefs"],
+  properties: {
+    id: { type: "string" }, owner: { type: "string" }, version: { type: "integer" },
+    createdAt: { type: "string", format: "date-time" }, updatedAt: { type: "string", format: "date-time" },
+    shortId: { type: "string", nullable: true }, title: { type: "string" }, description: { type: "string", nullable: true },
+    status: { type: "string", enum: ["pending", "ready", "in_progress", "blocked", "completed", "failed", "cancelled"] },
+    priority: { type: "string", enum: ["low", "medium", "high", "critical"] },
+    projectId: { type: "string", nullable: true }, taskListId: { type: "string", nullable: true },
+    planId: { type: "string", nullable: true }, parentTaskId: { type: "string", nullable: true },
+    assignedAgentId: { type: "string", nullable: true }, fingerprint: { type: "string", nullable: true },
+    tags: { type: "array", items: { type: "string" } }, acceptanceCriteria: { type: "array", items: { type: "string" } },
+    dueAt: { type: "string", format: "date-time", nullable: true }, completedAt: { type: "string", format: "date-time", nullable: true },
+    externalOwnerRefs: { type: "array", items: { type: "object", additionalProperties: false, required: ["owner", "id", "digest"], properties: { owner: { type: "string" }, id: { type: "string" }, digest: { type: "string" } } } },
+  },
+} as const;
+
+const customerSavedViewSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["id", "owner", "version", "createdAt", "updatedAt", "name", "description", "query", "audience"],
+  properties: {
+    id: { type: "string" }, owner: { type: "string" }, version: { type: "integer" },
+    createdAt: { type: "string", format: "date-time" }, updatedAt: { type: "string", format: "date-time" },
+    name: { type: "string" }, description: { type: "string", nullable: true }, query: customerSearchRequestSchema,
+    audience: { type: "string", enum: ["private", "organization"] },
+  },
+} as const;
+
+const customerTaskPageResponseSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["ok", "data", "requestId"],
+  properties: {
+    ok: { type: "boolean", enum: [true] }, requestId: { type: "string" },
+    data: { type: "object", additionalProperties: false, required: ["items", "count", "nextCursor"], properties: {
+      items: { type: "array", items: customerTaskSchema }, count: { type: "integer" }, nextCursor: { type: "string", nullable: true },
+    } },
+  },
+} as const;
+
+const customerSavedViewResponseSchema = {
+  type: "object", additionalProperties: false, required: ["ok", "data", "requestId"],
+  properties: { ok: { type: "boolean", enum: [true] }, data: customerSavedViewSchema, requestId: { type: "string" } },
+} as const;
+
+const customerSavedViewPageResponseSchema = {
+  type: "object", additionalProperties: false, required: ["ok", "data", "requestId"],
+  properties: { ok: { type: "boolean", enum: [true] }, requestId: { type: "string" }, data: {
+    type: "object", additionalProperties: false, required: ["items", "count", "nextCursor"],
+    properties: { items: { type: "array", items: customerSavedViewSchema }, count: { type: "integer" }, nextCursor: { type: "string", nullable: true } },
+  } },
+} as const;
+
 const templateTaskSchema = {
   type: "object",
   required: ["id", "template_id", "position", "title_pattern", "priority", "tags", "depends_on_positions", "metadata", "created_at"],
@@ -176,6 +261,13 @@ export function buildV1OpenApiDocument(version = getPackageVersion()) {
         TaskList: taskListSchema,
         TaskComment: taskCommentSchema,
         Plan: planSchema,
+        CustomerSearchFilters: customerSearchFiltersSchema,
+        CustomerSearchRequest: customerSearchRequestSchema,
+        CustomerTask: customerTaskSchema,
+        CustomerSavedView: customerSavedViewSchema,
+        CustomerTaskPageResponse: customerTaskPageResponseSchema,
+        CustomerSavedViewResponse: customerSavedViewResponseSchema,
+        CustomerSavedViewPageResponse: customerSavedViewPageResponseSchema,
         Template: templateSchema,
         TemplateTask: templateTaskSchema,
         TemplateVariable: templateVariableSchema,
@@ -870,6 +962,76 @@ export function buildV1OpenApiDocument(version = getPackageVersion()) {
     },
     security: [{ apiKey: [] }],
     paths: {
+      "/v1/search": {
+        post: {
+          operationId: "executeSearch",
+          summary: "Search the persisted Todos task corpus",
+          requestBody: { required: true, content: { "application/json": { schema: { $ref: "#/components/schemas/CustomerSearchRequest" } } } },
+          responses: { "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/CustomerTaskPageResponse" } } } } },
+        },
+      },
+      "/v1/saved-views": {
+        get: {
+          operationId: "listSavedViews",
+          summary: "List persisted customer saved views",
+          parameters: [
+            { name: "cursor", in: "query", schema: { type: "string" } },
+            { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 500 } },
+            { name: "project_id", in: "query", schema: { type: "string" } },
+            { name: "task_list_id", in: "query", schema: { type: "string" } },
+            { name: "plan_id", in: "query", schema: { type: "string" } },
+            { name: "agent_id", in: "query", schema: { type: "string" } },
+            { name: "status", in: "query", schema: { type: "string" } },
+            { name: "changed_after", in: "query", schema: { type: "string", format: "date-time" } },
+          ],
+          responses: { "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/CustomerSavedViewPageResponse" } } } } },
+        },
+        post: {
+          operationId: "createSavedView",
+          summary: "Create a persisted customer saved view",
+          requestBody: { required: true, content: { "application/json": { schema: {
+            type: "object", additionalProperties: false, required: ["name", "description", "query", "audience"],
+            properties: { name: { type: "string" }, description: { type: "string", nullable: true }, query: { $ref: "#/components/schemas/CustomerSearchRequest" }, audience: { type: "string", enum: ["private", "organization"] } },
+          } } } },
+          responses: { "201": { content: { "application/json": { schema: { $ref: "#/components/schemas/CustomerSavedViewResponse" } } } } },
+        },
+      },
+      "/v1/saved-views/{ref}": {
+        get: {
+          operationId: "getSavedView",
+          summary: "Get one customer saved view",
+          parameters: [{ name: "ref", in: "path", required: true, schema: { type: "string" } }],
+          responses: { "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/CustomerSavedViewResponse" } } } } },
+        },
+        patch: {
+          operationId: "updateSavedView",
+          summary: "Update one customer saved view",
+          parameters: [{ name: "ref", in: "path", required: true, schema: { type: "string" } }],
+          requestBody: { required: true, content: { "application/json": { schema: {
+            type: "object", additionalProperties: false, required: ["expectedVersion"],
+            properties: { expectedVersion: { type: "integer", minimum: 1 }, name: { type: "string" }, description: { type: "string", nullable: true }, query: { $ref: "#/components/schemas/CustomerSearchRequest" }, audience: { type: "string", enum: ["private", "organization"] } },
+          } } } },
+          responses: { "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/CustomerSavedViewResponse" } } } } },
+        },
+        delete: {
+          operationId: "deleteSavedView",
+          summary: "Delete one customer saved view",
+          parameters: [
+            { name: "ref", in: "path", required: true, schema: { type: "string" } },
+            { name: "expected_version", in: "query", required: true, schema: { type: "integer", minimum: 1 } },
+          ],
+          responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" }, requestId: { type: "string" }, data: { type: "object", properties: { operationId: { type: "string" }, resourceId: { type: "string" }, changed: { type: "boolean" }, replayed: { type: "boolean" }, version: { type: "integer", nullable: true } } } } } } } } },
+        },
+      },
+      "/v1/saved-views/{ref}/execute": {
+        post: {
+          operationId: "executeSavedView",
+          summary: "Execute one persisted customer saved view",
+          parameters: [{ name: "ref", in: "path", required: true, schema: { type: "string" } }],
+          requestBody: { required: true, content: { "application/json": { schema: { type: "object", additionalProperties: false, required: ["cursor", "limit"], properties: { cursor: { type: "string", nullable: true }, limit: { type: "integer", minimum: 1, maximum: 500 } } } } } },
+          responses: { "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/CustomerTaskPageResponse" } } } } },
+        },
+      },
       "/v1/tasks": {
         get: {
           operationId: "listTasks",

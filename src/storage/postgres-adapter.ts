@@ -69,6 +69,20 @@ import {
 } from "../lib/integrity.js";
 import { redactEvidenceText } from "../lib/redaction.js";
 import {
+  customerSavedViewOwner,
+  executeCustomerSearchDataset,
+  newCustomerSavedView,
+  paginateCustomerSavedViews,
+  parseCustomerSavedView,
+  parseCustomerSavedViewCreate,
+  parseCustomerSavedViewExecute,
+  parseCustomerSavedViewList,
+  parseCustomerSavedViewUpdate,
+  type CustomerSavedView,
+  type CustomerSavedViewExecuteInput,
+  type CustomerSavedViewUpdateInput,
+} from "../lib/customer-search-contract.js";
+import {
   isCanonicalSlug,
   isValidTaskListProjectScope,
   normalizeSlug,
@@ -76,7 +90,7 @@ import {
   validateSnapshotRoutingRecords,
 } from "../lib/slugs.js";
 
-type RemoteObjectType = TodosPostgresSyncRecordType | "comments" | "dependencies" | "verifications" | "commits" | "refs" | "template_tasks";
+type RemoteObjectType = TodosPostgresSyncRecordType | "comments" | "dependencies" | "verifications" | "commits" | "refs" | "template_tasks" | "saved_views" | "task_runs";
 
 export interface CreatePostgresTodosStorageAdapterOptions {
   client: TodosPostgresQueryClient;
@@ -158,6 +172,17 @@ export function createPostgresTodosStorageAdapter(
       add: (input, context) => addGitRef(input, store, context),
       list: (taskId) => listGitRefs(taskId, store),
       find: (ref) => findGitRefs(ref, store),
+    },
+    customerSearch: {
+      execute: (input) => executePostgresCustomerSearch(input, store),
+    },
+    customerSavedViews: {
+      create: (input, context) => createPostgresCustomerSavedView(input, store, context),
+      get: (ref, context) => getPostgresCustomerSavedView(ref, store, context),
+      list: (input, context) => listPostgresCustomerSavedViews(input, store, context),
+      update: (input, context) => updatePostgresCustomerSavedView(input, store, context),
+      execute: (input, context) => executePostgresCustomerSavedView(input, store, context),
+      delete: (ref, expectedVersion, context) => deletePostgresCustomerSavedView(ref, expectedVersion, store, context),
     },
     projects: {
       create: (input, context) => createProject(input, store, context),
@@ -581,7 +606,7 @@ class PostgresJsonRecordStore {
     });
   }
 
-  async upsert<T extends { id: string; updated_at?: string; created_at?: string; version?: number }>(
+  async upsert<T extends { id: string; updated_at?: string; created_at?: string; updatedAt?: string; createdAt?: string; version?: number }>(
     type: RemoteObjectType,
     value: T,
     context: TodosStorageContext = {},
@@ -598,7 +623,8 @@ class PostgresJsonRecordStore {
       }
     }
     await this.ensureSchema();
-    const updatedAt = stringValue(value.updated_at) ?? stringValue(value.created_at) ?? new Date().toISOString();
+    const updatedAt = stringValue(value.updated_at) ?? stringValue(value.updatedAt) ??
+      stringValue(value.created_at) ?? stringValue(value.createdAt) ?? new Date().toISOString();
     // M8: resolve conflicts by (updated_at, version) rather than wall-clock only.
     // A row with an equal timestamp but a higher version still wins, and a
     // stale-clock write can no longer silently overwrite a newer version.
@@ -1056,6 +1082,138 @@ class PostgresJsonRecordStore {
       [this.service, name, value],
     );
   }
+}
+
+function appendSearchDocument(documents: Map<string, unknown[]>, taskId: unknown, value: unknown): void {
+  if (typeof taskId !== "string" || !documents.has(taskId)) return;
+  documents.get(taskId)!.push(value);
+}
+
+async function executePostgresCustomerSearch(
+  input: unknown,
+  store: PostgresJsonRecordStore,
+): Promise<ReturnType<typeof executeCustomerSearchDataset>> {
+  const [tasks, projects, plans, comments, dependencies, verifications, commits, refs, audit, runs] = await Promise.all([
+    store.list<Task>("tasks"),
+    store.list<Project>("projects"),
+    store.list<Plan>("plans"),
+    store.list<TaskComment>("comments"),
+    store.list<TaskDependency>("dependencies"),
+    store.list<TodosTaskVerification>("verifications"),
+    store.list<TodosTaskCommitRecord>("commits"),
+    store.list<TodosTaskGitRefRecord>("refs"),
+    store.list<TaskHistory>("audit_history"),
+    store.list<Record<string, unknown>>("task_runs"),
+  ]);
+  const documents = new Map(tasks.map((task) => [task.id, [] as unknown[]]));
+  for (const project of projects) {
+    for (const task of tasks) if (task.project_id === project.id) appendSearchDocument(documents, task.id, project);
+  }
+  for (const plan of plans) {
+    for (const task of tasks) if (task.plan_id === plan.id) appendSearchDocument(documents, task.id, plan);
+  }
+  for (const row of [...comments, ...verifications, ...commits, ...refs, ...audit, ...runs] as Array<Record<string, unknown>>) {
+    appendSearchDocument(documents, row.task_id, row);
+  }
+  for (const dependency of dependencies) {
+    appendSearchDocument(documents, dependency.task_id, dependency);
+    appendSearchDocument(documents, dependency.depends_on, dependency);
+  }
+  return executeCustomerSearchDataset(input, { tasks, documents });
+}
+
+function savedViewOwner(context?: TodosStorageContext): string {
+  return customerSavedViewOwner(context?.organizationId);
+}
+
+async function getPostgresCustomerSavedView(
+  ref: string,
+  store: PostgresJsonRecordStore,
+  context?: TodosStorageContext,
+): Promise<CustomerSavedView | null> {
+  const owner = savedViewOwner(context);
+  const view = (await store.list<CustomerSavedView>("saved_views"))
+    .find((candidate) => candidate.owner === owner && (candidate.id === ref || candidate.name === ref));
+  return view ? parseCustomerSavedView(view) : null;
+}
+
+async function createPostgresCustomerSavedView(
+  rawInput: unknown,
+  store: PostgresJsonRecordStore,
+  context?: TodosStorageContext,
+): Promise<CustomerSavedView> {
+  const input = parseCustomerSavedViewCreate(rawInput);
+  const existing = await getPostgresCustomerSavedView(input.name, store, context);
+  if (existing) {
+    if (JSON.stringify({ name: existing.name, description: existing.description, query: existing.query, audience: existing.audience }) === JSON.stringify(input)) {
+      return existing;
+    }
+    throw new Error(`Saved view already exists: ${input.name}`);
+  }
+  const view = newCustomerSavedView(input, savedViewOwner(context));
+  return store.upsert("saved_views", view, context);
+}
+
+async function listPostgresCustomerSavedViews(
+  rawInput: unknown,
+  store: PostgresJsonRecordStore,
+  context?: TodosStorageContext,
+) {
+  const input = parseCustomerSavedViewList(rawInput);
+  const owner = savedViewOwner(context);
+  const views = (await store.list<CustomerSavedView>("saved_views"))
+    .filter((view) => view.owner === owner)
+    .map(parseCustomerSavedView);
+  return paginateCustomerSavedViews(views, input);
+}
+
+async function updatePostgresCustomerSavedView(
+  rawInput: unknown,
+  store: PostgresJsonRecordStore,
+  context?: TodosStorageContext,
+): Promise<CustomerSavedView> {
+  const input = parseCustomerSavedViewUpdate(rawInput) as CustomerSavedViewUpdateInput;
+  const current = await getPostgresCustomerSavedView(input.ref, store, context);
+  if (!current) throw new Error(`Saved view not found: ${input.ref}`);
+  if (current.version !== input.expectedVersion) {
+    throw new Error(`Saved view version conflict: expected ${input.expectedVersion}, current ${current.version}`);
+  }
+  const updated = parseCustomerSavedView({
+    ...current,
+    ...(input.name !== undefined ? { name: input.name } : {}),
+    ...(input.description !== undefined ? { description: input.description } : {}),
+    ...(input.query !== undefined ? { query: input.query } : {}),
+    ...(input.audience !== undefined ? { audience: input.audience } : {}),
+    version: current.version + 1,
+    updatedAt: new Date().toISOString(),
+  });
+  return store.upsert("saved_views", updated, context);
+}
+
+async function executePostgresCustomerSavedView(
+  rawInput: unknown,
+  store: PostgresJsonRecordStore,
+  context?: TodosStorageContext,
+) {
+  const input = parseCustomerSavedViewExecute(rawInput) as CustomerSavedViewExecuteInput;
+  const view = await getPostgresCustomerSavedView(input.ref, store, context);
+  if (!view) throw new Error(`Saved view not found: ${input.ref}`);
+  return executePostgresCustomerSearch({ ...view.query, cursor: input.cursor, limit: input.limit }, store);
+}
+
+async function deletePostgresCustomerSavedView(
+  ref: string,
+  expectedVersion: number,
+  store: PostgresJsonRecordStore,
+  context?: TodosStorageContext,
+): Promise<CustomerSavedView> {
+  const view = await getPostgresCustomerSavedView(ref, store, context);
+  if (!view) throw new Error(`Saved view not found: ${ref}`);
+  if (view.version !== expectedVersion) {
+    throw new Error(`Saved view version conflict: expected ${expectedVersion}, current ${view.version}`);
+  }
+  await store.delete("saved_views", view.id, context);
+  return view;
 }
 
 async function createTask(input: CreateTaskInput, store: PostgresJsonRecordStore, context?: TodosStorageContext): Promise<Task> {

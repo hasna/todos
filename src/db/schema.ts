@@ -1145,6 +1145,24 @@ export function ensureSchema(db: Database): void {
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_saved_views_slug ON saved_views(slug)");
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_saved_views_entity ON saved_views(entity_type)");
 
+  // Strict @hasna/contracts search views. Kept separate from the two legacy
+  // local view tables because this record carries contract owner/audience,
+  // optimistic versioning, and the complete canonical search request.
+  ensureTable("customer_saved_views", `
+    CREATE TABLE customer_saved_views (
+      id TEXT PRIMARY KEY,
+      owner TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT,
+      query_json TEXT NOT NULL,
+      audience TEXT NOT NULL CHECK(audience IN ('private', 'organization')),
+      version INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(owner, name)
+    )`);
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_customer_saved_views_owner_updated ON customer_saved_views(owner, updated_at DESC, id)");
+
   // Decision records and knowledge snapshots
   ensureTable("decision_records", `
     CREATE TABLE decision_records (

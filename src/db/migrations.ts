@@ -1674,4 +1674,22 @@ export const MIGRATIONS = [
   COMMIT;
   PRAGMA foreign_keys = ON;
   `,
+  // Migration 69: strict customer search saved views
+  `
+  CREATE TABLE IF NOT EXISTS customer_saved_views (
+    id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    query_json TEXT NOT NULL,
+    audience TEXT NOT NULL CHECK(audience IN ('private', 'organization')),
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(owner, name)
+  );
+  CREATE INDEX IF NOT EXISTS idx_customer_saved_views_owner_updated
+    ON customer_saved_views(owner, updated_at DESC, id);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (69);
+  `,
 ];

@@ -26,6 +26,11 @@ import type {
   UpdateTaskListInput,
 } from "../types/index.js";
 import type { IntegrityReport } from "../lib/integrity.js";
+import type {
+  CustomerSavedView,
+  CustomerSavedViewPage,
+  CustomerTaskPage,
+} from "../lib/customer-search-contract.js";
 
 export type MaybePromise<T> = T | Promise<T>;
 
@@ -71,6 +76,10 @@ export interface TodosStorageAdapter {
   readonly commits?: TodosCommitStore;
   /** Git branch/PR ref links (optional; present on the Postgres adapter). */
   readonly gitRefs?: TodosGitRefStore;
+  /** Strict customer search surface from the @hasna/contracts operation manifest. */
+  readonly customerSearch?: TodosCustomerSearchStore;
+  /** Persisted strict saved-view CRUD/execute surface. */
+  readonly customerSavedViews?: TodosCustomerSavedViewStore;
   /**
    * Referential-integrity counts (orphaned and dangling project / task-list
    * references) computed SQL-side by the backing engine.
@@ -84,6 +93,19 @@ export interface TodosStorageAdapter {
    */
   readonly integrity?: TodosIntegrityStore;
   transaction?<T>(fn: (adapter: TodosStorageAdapter) => MaybePromise<T>, context?: TodosStorageContext): MaybePromise<T>;
+}
+
+export interface TodosCustomerSearchStore {
+  execute(input: unknown, context?: TodosStorageContext): MaybePromise<CustomerTaskPage>;
+}
+
+export interface TodosCustomerSavedViewStore {
+  create(input: unknown, context?: TodosStorageContext): MaybePromise<CustomerSavedView>;
+  get(ref: string, context?: TodosStorageContext): MaybePromise<CustomerSavedView | null>;
+  list(input: unknown, context?: TodosStorageContext): MaybePromise<CustomerSavedViewPage>;
+  update(input: unknown, context?: TodosStorageContext): MaybePromise<CustomerSavedView>;
+  execute(input: unknown, context?: TodosStorageContext): MaybePromise<CustomerTaskPage>;
+  delete(ref: string, expectedVersion: number, context?: TodosStorageContext): MaybePromise<CustomerSavedView>;
 }
 
 export interface TodosIntegrityStore {
