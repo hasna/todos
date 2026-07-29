@@ -587,7 +587,7 @@ describe("storage adapter contracts", () => {
       HASNA_TODOS_DATABASE_URL: "postgres://remote/ignored-until-mode-is-explicit",
     });
 
-    expect(config.mode).toBe("local");
+    expect(config.mode).toBe("sqlite");
     expect(config.database?.url).toBe("postgres://remote/ignored-until-mode-is-explicit");
     expect(createTodosStorageAdapter({ config, local: { db } }).kind).toBe("sqlite");
   });
@@ -605,7 +605,7 @@ describe("storage adapter contracts", () => {
 
     expect(config).toMatchObject({
       service: "todos",
-      mode: "remote",
+      mode: "postgres",
       database: {
         provider: "postgres",
         url: "postgres://todos@rds.example/todos",
@@ -641,7 +641,7 @@ describe("storage adapter contracts", () => {
 
     expect(config).toMatchObject({
       service: "todos",
-      mode: "hybrid",
+      mode: "postgres",
       database: {
         provider: "postgres",
         url: "postgres://todos@rds.example/fallback",
@@ -660,7 +660,7 @@ describe("storage adapter contracts", () => {
     expect(STORAGE_TABLES).toEqual(["todos_sync_records", "todos_sync_cursors"]);
     expect(TODOS_STORAGE_ENV.databaseUrl).toBe("HASNA_TODOS_DATABASE_URL");
     expect(TODOS_STORAGE_FALLBACK_ENV.databaseUrl).toBe("TODOS_DATABASE_URL");
-    expect(getStorageMode(env)).toBe("hybrid");
+    expect(getStorageMode(env)).toBe("postgres");
     expect(getStorageDatabaseEnv(env)).toBe("TODOS_DATABASE_URL");
     expect(getStorageDatabaseUrl(env)).toBe("postgres://todos@rds.example/fallback");
   });
@@ -692,7 +692,7 @@ describe("storage adapter contracts", () => {
       HASNA_TODOS_DATABASE_URL: "postgres://todos@rds.example/todos",
     });
 
-    expect(() => createTodosStorageAdapter({ config, local: { db } })).toThrow("remote storage requires");
+    expect(() => createTodosStorageAdapter({ config, local: { db } })).toThrow("postgres storage requires");
     expect(createTodosStorageAdapter({ config, remoteAdapter: fakeRemoteAdapter() }).kind).toBe("postgres");
   });
 
@@ -706,7 +706,7 @@ describe("storage adapter contracts", () => {
       config,
       local: { db },
       postgresClient: postgres.client,
-      hybrid: { sourceMachineId: "apple06" },
+      sourceMachineId: "apple06",
     });
 
     const project = await adapter.projects.create(
@@ -1745,7 +1745,7 @@ describe("storage adapter contracts", () => {
     expect(updated.version).toBe(task.version + 1);
   });
 
-  test("builds a hybrid local plus Postgres sync adapter from native config", async () => {
+  test("builds a hybrid local plus Postgres sync adapter through its explicit constructor", async () => {
     const calls: Array<{ sql: string; values?: readonly unknown[] }> = [];
     const client = {
       async query(sql: string, values?: readonly unknown[]) {
@@ -1774,16 +1774,14 @@ describe("storage adapter contracts", () => {
         return { rows: [] };
       },
     };
-    const config = loadTodosStorageConfig({
-      HASNA_TODOS_STORAGE_MODE: "hybrid",
-      HASNA_TODOS_DATABASE_URL: "postgres://todos@rds.example/todos",
-    });
-    const adapter = createTodosStorageAdapter({
-      config,
+    // The hybrid dual-write adapter is migration machinery, reachable only
+    // through this explicit constructor — the data-backend switch has exactly
+    // two arms (sqlite | postgres) and never returns it.
+    const adapter: HybridTodosStorageAdapter = createHybridTodosStorageAdapter({
       local: { db },
       postgresClient: client,
-      hybrid: { sourceMachineId: "apple06" },
-    }) as HybridTodosStorageAdapter;
+      sourceMachineId: "apple06",
+    });
 
     await adapter.tasks.create({
       title: "Local hybrid task",
@@ -2344,9 +2342,9 @@ function createMemoryPostgresClient(): {
           const v = grabScalar("payload->>'session_id' = ");
           preds.push((t) => (t["session_id"] ?? null) === v);
         }
-        if (sql.includes("payload->'tags' @>")) {
-          const tags = grabScalar("payload->'tags' @> ") as string[];
-          preds.push((t) => Array.isArray(t["tags"]) && tags.every((x) => (t["tags"] as string[]).includes(x)));
+        if (sql.includes("jsonb_array_elements_text(COALESCE(payload->'tags'")) {
+          const tags = grabIn("task_tags.tag IN (")!;
+          preds.push((t) => Array.isArray(t["tags"]) && (t["tags"] as string[]).some((x) => tags.includes(x)));
         }
         if (sql.includes("<> '') = $")) {
           const v = grabScalar("<> '') = ");
