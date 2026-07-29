@@ -1139,6 +1139,37 @@ export interface CloudUpsertTaskResult {
   created: boolean;
 }
 
+/** Compact result from the first-class finding issue-task upsert API. */
+export interface CloudUpsertFindingResult {
+  schema_version: "todos.finding_upsert.v1";
+  action: "created" | "updated";
+  evidence_action: "appended" | "matched" | "none";
+  finding: {
+    id: string;
+    short_id: string | null;
+    fingerprint: string;
+    title: string;
+    status: string;
+    finding_status: "open" | "resolved" | "ignored";
+    severity: "low" | "medium" | "high" | "critical";
+    priority: string;
+    project_id: string | null;
+    task_list_id: string | null;
+    tags: string[];
+    created_at: string;
+    updated_at: string;
+  };
+}
+
+/** Create or refresh one project-scoped issue finding on the shared dataset. */
+export async function cloudUpsertFinding(
+  client: HasnaStorageClient,
+  input: Record<string, unknown> & { fingerprint: string; title: string },
+): Promise<CloudUpsertFindingResult> {
+  return requiredRemoteRoute(client, "/v1/findings/upsert", () =>
+    client.transport.post<CloudUpsertFindingResult>("/findings/upsert", input));
+}
+
 /**
  * Idempotent create-or-update a task by stable fingerprint on the SHARED dataset
  * (`POST /v1/tasks/upsert`). Fixes the split-brain write where `task upsert` wrote

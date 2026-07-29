@@ -2041,6 +2041,16 @@ export {
   upsertTaskFinding,
 } from "./db/findings.js";
 export {
+  FINDING_UPSERT_SCHEMA_VERSION,
+  findingEvidenceFingerprint,
+  findingTaskDedupeFingerprint,
+  findingTaskStatus,
+  normalizeFindingFingerprint,
+  normalizeFindingSeverity,
+  normalizeFindingStatus,
+  upsertFinding,
+} from "./db/finding-upsert.js";
+export {
   getSecretSafetyConfig,
   hasSecretFindings,
   listSecretFindings,
@@ -2123,6 +2133,15 @@ export type {
   UpsertTaskFindingInput,
   UpsertTaskFindingResult,
 } from "./db/findings.js";
+export type {
+  CompactFindingTask,
+  FindingEvidenceAction,
+  FindingSeverity,
+  FindingStatus,
+  FindingUpsertAction,
+  UpsertFindingInput,
+  UpsertFindingResult,
+} from "./db/finding-upsert.js";
 export {
   createInboxItem,
   deriveInboxTitle,

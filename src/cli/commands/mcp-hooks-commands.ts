@@ -3,9 +3,22 @@ import chalk from "chalk";
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { resolve } from "node:path";
 import { createTask } from "../../db/tasks.js";
+import { getDatabase, resolvePartialId } from "../../db/database.js";
+import { upsertFinding } from "../../db/finding-upsert.js";
 import { autoProject, output, resolveTaskId, resolveTaskIdForCommand, handleError } from "../helpers.js";
-import { getTodosCloudClient, cloudRecordVerification, cloudLinkCommit, cloudFindCommit, cloudLinkRef, cloudFindRefs } from "../cloud-router.js";
+import {
+  getTodosCloudClient,
+  cloudRecordVerification,
+  cloudLinkCommit,
+  cloudFindCommit,
+  cloudLinkRef,
+  cloudFindRefs,
+  cloudResolveProjectRef,
+  cloudResolveTaskListRef,
+  cloudUpsertFinding,
+} from "../cloud-router.js";
 
 const HOME = process.env["HOME"] || process.env["USERPROFILE"] || "~";
 
@@ -1153,37 +1166,88 @@ exit 0
 
   const findings = program
     .command("findings")
-    .description("Manage local task findings for loop dedupe and resolution");
+    .description("Create deduped issue findings or manage task-scoped finding records");
 
   findings
     .command("upsert")
-    .description("Preview or apply an idempotent finding upsert")
-    .requiredOption("--task <task-id>", "Task ID")
+    .description("Create or update a project-scoped issue task by stable finding fingerprint")
+    .option("--task <task-id>", "Existing task scope (legacy local finding-record mode)")
     .requiredOption("--fingerprint <value>", "Stable finding fingerprint")
     .requiredOption("--title <text>", "Finding title")
-    .option("--severity <severity>", "low, medium, high, or critical", "medium")
+    .option("--body <text>", "Issue task description")
+    .option("--evidence <text>", "Evidence comment to append once")
+    .option("--evidence-fingerprint <value>", "Stable key used to dedupe the evidence comment")
+    .option("--severity <severity>", "low, medium, high, or critical")
+    .option("--priority <priority>", "Task priority; defaults to severity")
     .option("--status <status>", "open, resolved, or ignored", "open")
+    .option("--list <id>", "Task list ID")
+    .option("--project <id>", "Project ID, slug, name, or path")
+    .option("--tags <tags>", "Comma-separated task tags")
+    .option("--assign <agent>", "Assign the issue task to an agent")
+    .option("--working-dir <path>", "Working directory associated with the issue task")
     .option("--source <source>", "Loop/tool source name")
     .option("--summary <text>", "Bounded finding summary")
     .option("--artifact <path>", "Local artifact path/reference; content is not read")
     .option("--run <run-id>", "Run ledger ID or prefix")
     .option("--metadata <json>", "Additional JSON metadata")
     .option("--apply", "Apply the upsert; omitted means dry-run")
-    .action(async (opts: { task: string; fingerprint: string; title: string; severity?: string; status?: string; source?: string; summary?: string; artifact?: string; run?: string; metadata?: string; apply?: boolean }) => {
-      const { upsertTaskFinding } = await import("../../db/findings.js");
-      const result = upsertTaskFinding({
-        task_id: resolveTaskId(opts.task),
+    .action(async (opts: { task?: string; fingerprint: string; title: string; body?: string; evidence?: string; evidenceFingerprint?: string; severity?: string; priority?: string; status?: string; list?: string; project?: string; tags?: string; assign?: string; workingDir?: string; source?: string; summary?: string; artifact?: string; run?: string; metadata?: string; apply?: boolean }) => {
+      const globalOpts = program.opts();
+      if (opts.task) {
+        const { upsertTaskFinding } = await import("../../db/findings.js");
+        const result = upsertTaskFinding({
+          task_id: resolveTaskId(opts.task),
+          fingerprint: opts.fingerprint,
+          title: opts.title,
+          severity: opts.severity,
+          status: opts.status,
+          source: opts.source,
+          summary: opts.summary,
+          artifact_path: opts.artifact,
+          run_id: opts.run,
+          metadata: parseJsonOption(opts.metadata, "--metadata"),
+          apply: opts.apply,
+        });
+        output(result, true);
+        return;
+      }
+
+      const cloud = getTodosCloudClient();
+      const explicitProject = opts.project || globalOpts.project;
+      const projectId = cloud
+        ? (explicitProject ? await cloudResolveProjectRef(cloud, explicitProject) : undefined)
+        : autoProject({ project: explicitProject });
+      const taskListId = opts.list
+        ? cloud
+          ? await cloudResolveTaskListRef(cloud, opts.list, projectId)
+          : (() => {
+              const id = resolvePartialId(getDatabase(), "task_lists", opts.list!);
+              if (!id) handleError(new Error(`Could not resolve task list ID: ${opts.list}`));
+              return id;
+            })()
+        : undefined;
+      const input = {
         fingerprint: opts.fingerprint,
         title: opts.title,
+        body: opts.body,
+        evidence: opts.evidence,
+        evidence_fingerprint: opts.evidenceFingerprint,
         severity: opts.severity,
+        priority: opts.priority,
         status: opts.status,
+        tags: listOption(opts.tags),
+        project_id: projectId,
+        task_list_id: taskListId,
         source: opts.source,
-        summary: opts.summary,
-        artifact_path: opts.artifact,
-        run_id: opts.run,
         metadata: parseJsonOption(opts.metadata, "--metadata"),
-        apply: opts.apply,
-      });
+        assigned_to: opts.assign,
+        agent_id: globalOpts.agent,
+        session_id: globalOpts.session,
+        working_dir: opts.workingDir ? resolve(opts.workingDir) : process.cwd(),
+      };
+      const result = cloud
+        ? await cloudUpsertFinding(cloud, input)
+        : upsertFinding(input);
       output(result, true);
     });
 
