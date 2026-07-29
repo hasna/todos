@@ -44,6 +44,17 @@ const root = resolve(import.meta.dir, "..");
 const rawArgs = process.argv.slice(2);
 const args = new Set(rawArgs);
 
+// Wall-clock budget for each serve probe. The refusal/startup print is nearly
+// instant on an idle machine, but a publish often runs on a loaded station
+// where bun's cold start alone measured 3.1s — a 3s budget then kills the
+// process BEFORE its (correct) refusal prints, and the empty capture is
+// indistinguishable from "started without refusing". Same flake class as the
+// Stage-A remote-entrypoint budget (a18a8b7); the check's semantics are
+// unchanged — only the deadline moved. Declared BEFORE the top-level main()
+// call: a later const sits in the temporal dead zone when main() runs at
+// import time (#103 shipped exactly that ReferenceError).
+const SERVE_PROBE_TIMEOUT_SECONDS = "15";
+
 main();
 
 function main(): void {
@@ -338,8 +349,8 @@ function expectServeStartup(command: string, env: NodeJS.ProcessEnv): void {
   // 1. FAIL CLOSED: with no credential the packed binary must refuse to start
   //    rather than publish an anonymous /api/* + /mcp plane.
   const denyPort = `${19600 + Math.floor(Math.random() * 1000)}`;
-  console.log(`$ timeout 3 ${command} --port=${denyPort} --host 127.0.0.1 --no-open  # expect refusal`);
-  const denied = runCapture("timeout", ["3", command, `--port=${denyPort}`, "--host", "127.0.0.1", "--no-open"], env);
+  console.log(`$ timeout ${SERVE_PROBE_TIMEOUT_SECONDS} ${command} --port=${denyPort} --host 127.0.0.1 --no-open  # expect refusal`);
+  const denied = runCapture("timeout", [SERVE_PROBE_TIMEOUT_SECONDS, command, `--port=${denyPort}`, "--host", "127.0.0.1", "--no-open"], env);
   const deniedOutput = `${denied.stdout}\n${denied.stderr}`;
   if (deniedOutput.includes("Todos Dashboard running at") || !deniedOutput.includes("TODOS_API_KEY")) {
     console.error(deniedOutput);
@@ -349,10 +360,10 @@ function expectServeStartup(command: string, env: NodeJS.ProcessEnv): void {
 
   // 2. And it must still start for the documented local-dev path.
   const port = `${20700 + Math.floor(Math.random() * 1000)}`;
-  console.log(`$ timeout 3 ${command} --port=${port} --host 127.0.0.1 --no-open --allow-anonymous`);
+  console.log(`$ timeout ${SERVE_PROBE_TIMEOUT_SECONDS} ${command} --port=${port} --host 127.0.0.1 --no-open --allow-anonymous`);
   const result = runCapture(
     "timeout",
-    ["3", command, `--port=${port}`, "--host", "127.0.0.1", "--no-open", "--allow-anonymous"],
+    [SERVE_PROBE_TIMEOUT_SECONDS, command, `--port=${port}`, "--host", "127.0.0.1", "--no-open", "--allow-anonymous"],
     env,
   );
   const output = `${result.stdout}\n${result.stderr}`;
