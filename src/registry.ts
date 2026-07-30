@@ -20,7 +20,7 @@ export interface TodosPackageSource {
 }
 
 export interface TodosPackageExportContract {
-  subpath: "." | "./sdk" | "./mcp" | "./registry" | "./contracts" | "./storage";
+  subpath: "." | "./sdk" | "./mcp" | "./registry" | "./contracts" | "./storage" | "./testing";
   import: string;
   types: string;
   description: string;
