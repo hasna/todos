@@ -82,6 +82,13 @@ export const TODOS_PACKAGE_EXPORTS: TodosPackageExportContract[] = [
     description: "Storage and service adapter contracts for local SQLite implementations.",
     stability: "stable",
   },
+  {
+    subpath: "./testing",
+    import: "./dist/testing.js",
+    types: "./dist/testing.d.ts",
+    description: "Test-store isolation helpers that keep a consumer's test suite off a shared todos store.",
+    stability: "stable",
+  },
 ];
 
 function source(version: string): TodosPackageSource {

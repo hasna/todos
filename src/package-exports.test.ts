@@ -41,6 +41,10 @@ const expectedExports = {
     types: "./dist/storage.d.ts",
     import: "./dist/storage.js",
   },
+  "./testing": {
+    types: "./dist/testing.d.ts",
+    import: "./dist/testing.js",
+  },
 };
 
 describe("package subpath exports", () => {
