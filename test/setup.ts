@@ -46,7 +46,18 @@ const workerRoot = mkdtempSync(join(tmpdir(), "todos-test-store-"));
 const databasePath = join(workerRoot, "todos.db");
 
 applyLocalTodosTestEnv({
-  HASNA_TODOS_DB_PATH: databasePath,
+  // Pin the LOWER-precedence variable only, and deliberately leave
+  // HASNA_TODOS_DB_PATH unset. `resolveDatabasePath` (src/db/database.ts:71-75)
+  // prefers HASNA_TODOS_DB_PATH and falls through to TODOS_DB_PATH, both
+  // truthy-checked. Pinning the higher-precedence one here would silently
+  // OUTRANK the many existing tests that set only TODOS_DB_PATH for their own
+  // per-test temp database — src/cli-events.test.ts is one — collapsing them
+  // onto this single process-wide file and bleeding state between cases.
+  //
+  // Setting the lower one instead is strictly safer in all three directions: a
+  // test that sets TODOS_DB_PATH overrides this by assigning the same key, a
+  // test that sets HASNA_TODOS_DB_PATH wins on precedence, and a test that sets
+  // neither lands here instead of on the developer's real database.
   TODOS_DB_PATH: databasePath,
 });
 
