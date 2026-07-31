@@ -38,7 +38,7 @@ import {
 } from "../cloud-router.js";
 import type { CloudTaskRelations } from "../cloud-router.js";
 import type { TaskPriority, TaskStatus } from "../../types/index.js";
-import { canonicalAgentRef, resolveCreatorIdentity } from "../../lib/creator-identity.js";
+import { canonicalAgentRef, resolveCreatorIdentity, resolveWritableIdentity } from "../../lib/creator-identity.js";
 import {
   formatTaskLine,
   resolveTaskId,
@@ -337,7 +337,13 @@ export function registerTaskCommands(program: Command) {
       // Who is FILING this task. `todos init` now persists the identity, so a
       // registered session no longer has to re-supply --agent on every command —
       // that omission is why creator attribution was empty on 92% of rows.
-      const creator = resolveCreatorIdentity(opts.createdBy || globalOpts.agent);
+      // Only an identity bound to THIS PROCESS may be written onto the row. The
+      // identity persisted by `todos init` is a single file keyed on $HOME, and
+      // this fleet runs many agent sessions per station under one HOME, so it
+      // names the station rather than the caller. Writing it stamped every
+      // unregistered session's tasks with whoever registered last — 54 rows on
+      // station01 on 2026-07-31, one of them this fix's own tracking task.
+      const creator = resolveWritableIdentity(opts.createdBy || globalOpts.agent);
       // Part 2: an unassigned task must be DELIBERATE. Left alone, `todos add`
       // produced an ownerless row silently, so the filer read "filed and
       // announced, therefore routed" while no seat was ever queued.
@@ -346,7 +352,7 @@ export function registerTaskCommands(program: Command) {
         // One line, not two: this fires on every add from an unregistered caller,
         // and a warning people scroll past is a warning that does not work.
         console.error(chalk.yellow(
-          "Warning: task is ownerless and unattributable — run `todos init <name>`, or pass --assign <agent> or --unassigned.",
+          "Warning: task is ownerless and unattributable — export TODOS_AGENT_ID=<name> for this session, or pass --agent/--assign <agent> or --unassigned.",
         ));
       }
 
@@ -1229,6 +1235,7 @@ export function registerTaskCommands(program: Command) {
     .option("-s, --status <status>", "New status")
     .option("-p, --priority <priority>", "New priority")
     .option("--assign <agent>", "Assign to agent")
+    .option("--set-agent <agent>", "Repair the agent_id stamped on this row (use \"\" to clear it as unattributable)")
     .option("--tags <tags>", "New tags (comma-separated)")
     .option("--tag <tags>", "New tags (alias for --tags)")
     .option("--list <id>", "Move to a task list (UUID authoritative; project-scoped slug accepted)")
@@ -1285,6 +1292,7 @@ export function registerTaskCommands(program: Command) {
             status: parseStatus(opts.status),
             priority: parsePriority(opts.priority),
             assigned_to: opts.assign,
+            agent_id: opts.setAgent !== undefined ? (opts.setAgent === "" ? null : canonicalAgentRef(opts.setAgent)) : undefined,
             tags: opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : undefined,
             plan_id: plan?.id ?? (opts.clearPlan ? null : undefined),
             ...reparent,
@@ -1328,6 +1336,7 @@ export function registerTaskCommands(program: Command) {
           status: parseStatus(opts.status),
           priority: parsePriority(opts.priority),
           assigned_to: opts.assign,
+          agent_id: opts.setAgent !== undefined ? (opts.setAgent === "" ? null : canonicalAgentRef(opts.setAgent)) : undefined,
           tags: opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : undefined,
           plan_id: planId,
           ...reparent,
