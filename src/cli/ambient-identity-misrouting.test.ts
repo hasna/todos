@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { localRoutingTestEnv } from "../test/local-routing-env.fixture.test.js";
 
@@ -39,7 +39,30 @@ let dbPath = "";
 /** The identity a DIFFERENT session on this station registered and never released. */
 const FOREIGN = "titus-skill-corpus";
 
+/**
+ * The suite that tests the shared-identity defect must not itself touch the shared
+ * identity. `~/.hasna/todos/identity.json` is the very file under discussion: it is
+ * keyed on $HOME, every agent on a station shares one HOME, and a test that reads it
+ * would pass or fail according to whichever agent registered last — while a test that
+ * WROTE it would stamp a fixture name onto every other agent's tasks.
+ *
+ * Setting HOME is a request, not a guarantee: a resolver that consults anything else
+ * silently escapes it, and the escape is invisible because the run still reports
+ * green. So the isolation is ASSERTED after every case rather than assumed, in both
+ * directions — the temp HOME is where the identity lands (the cases below rely on
+ * it, which is the positive control) and the real file is byte-identical afterwards.
+ */
+const realIdentityPath = join(homedir(), ".hasna", "todos", "identity.json");
+let realIdentityFingerprint: string | null = null;
+
+function fingerprintRealIdentity(): string | null {
+  if (!existsSync(realIdentityPath)) return null;
+  const s = statSync(realIdentityPath);
+  return `${s.mtimeMs}:${s.size}:${readFileSync(realIdentityPath, "utf8")}`;
+}
+
 beforeEach(() => {
+  realIdentityFingerprint = fingerprintRealIdentity();
   testRoot = mkdtempSync(join(tmpdir(), "todos-ambient-identity-"));
   homeDir = join(testRoot, "home");
   mkdirSync(join(homeDir, ".hasna", "todos"), { recursive: true });
@@ -47,6 +70,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Fail the suite rather than the fleet: if a case ever reaches the real file,
+  // that is a defect in identity resolution and it must surface here, loudly.
+  expect(fingerprintRealIdentity()).toBe(realIdentityFingerprint);
   rmSync(testRoot, { recursive: true, force: true });
 });
 
