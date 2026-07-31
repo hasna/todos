@@ -119,6 +119,26 @@ describe("todos add — a foreign session's persisted identity must not route wo
     expect(task.agent_id).not.toBe(FOREIGN);
   });
 
+  it("still records the ambient identity as created_by — the RESIDUAL, pinned deliberately", async () => {
+    // Scope boundary, stated rather than glossed. The fix narrows the two ROUTING
+    // columns (assigned_to, agent_id) and leaves provenance alone, because
+    // created_by is documented write-once and #138's contract depends on the
+    // identity file populating it. So a station-shared identity CAN still land a
+    // foreign name in created_by locally.
+    //
+    // That residual is bounded and currently inert on the hosted path: created_by
+    // came back non-null on 0 of 50000 rows read from todos.hasna.xyz on
+    // 2026-07-31, because the deployed server drops the column outright. It is
+    // pinned here so that a later reader cannot mistake this fix for full
+    // coverage — overstating a guard's reach is how the next one gets trusted
+    // past it.
+    persistForeignIdentity();
+    const task = await addJson(["unregistered session files a task"]);
+    expect(task.created_by).toBe(FOREIGN);
+    expect(task.assigned_to).not.toBe(FOREIGN);
+    expect(task.agent_id).not.toBe(FOREIGN);
+  });
+
   it("still warns that the task is ownerless so the omission is not silent", async () => {
     persistForeignIdentity();
     const result = await runCli(["--json", "add", "unregistered session files a task"]);

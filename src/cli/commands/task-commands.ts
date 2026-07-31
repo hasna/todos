@@ -337,17 +337,23 @@ export function registerTaskCommands(program: Command) {
       // Who is FILING this task. `todos init` now persists the identity, so a
       // registered session no longer has to re-supply --agent on every command —
       // that omission is why creator attribution was empty on 92% of rows.
-      // Only an identity bound to THIS PROCESS may be written onto the row. The
-      // identity persisted by `todos init` is a single file keyed on $HOME, and
-      // this fleet runs many agent sessions per station under one HOME, so it
-      // names the station rather than the caller. Writing it stamped every
-      // unregistered session's tasks with whoever registered last — 54 rows on
-      // station01 on 2026-07-31, one of them this fix's own tracking task.
-      const creator = resolveWritableIdentity(opts.createdBy || globalOpts.agent);
+      // `creator` may come from the identity file, which is keyed on $HOME and is
+      // therefore shared by every agent session on the station — it names the box,
+      // not the caller. It still supplies `created_by`, which is provenance and is
+      // documented write-once.
+      //
+      // `router` is the narrower one, and the two ROUTING columns take it instead:
+      // only `--agent` and TODOS_AGENT_ID, which travel with the process and cannot
+      // be handed to two concurrent sessions by accident. Stamping the shared file
+      // into `assigned_to` and `agent_id` is what queued one agent's work onto
+      // another — 43+ rows on station01 on 2026-07-31, one of them this fix's own
+      // tracking task.
+      const creator = resolveCreatorIdentity(opts.createdBy || globalOpts.agent);
+      const router = resolveWritableIdentity(opts.createdBy || globalOpts.agent);
       // Part 2: an unassigned task must be DELIBERATE. Left alone, `todos add`
       // produced an ownerless row silently, so the filer read "filed and
       // announced, therefore routed" while no seat was ever queued.
-      const assignee: string | undefined = opts.assign || (opts.unassigned ? undefined : creator.agent_id || undefined);
+      const assignee: string | undefined = opts.assign || (opts.unassigned ? undefined : router.agent_id || undefined);
       if (!assignee && !opts.unassigned) {
         // One line, not two: this fires on every add from an unregistered caller,
         // and a warning people scroll past is a warning that does not work.
@@ -387,7 +393,7 @@ export function registerTaskCommands(program: Command) {
             assigned_to: assignee,
             status: parseStatus(opts.status),
             task_list_id: cloudTaskListId,
-            agent_id: globalOpts.agent || creator.agent_id || undefined,
+            agent_id: globalOpts.agent || router.agent_id || undefined,
             created_by: creator.agent_id || undefined,
             session_id: globalOpts.session,
             project_id: cloudProjectId,
@@ -440,7 +446,7 @@ export function registerTaskCommands(program: Command) {
           assigned_to: assignee,
           status: parseStatus(opts.status),
           task_list_id: taskListId,
-          agent_id: globalOpts.agent || creator.agent_id || undefined,
+          agent_id: globalOpts.agent || router.agent_id || undefined,
           created_by: creator.agent_id || undefined,
           session_id: globalOpts.session,
           project_id: projectId,
