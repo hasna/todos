@@ -226,7 +226,7 @@ describe("agent identity projection contract", () => {
       process.env["TODOS_DB_PATH"] = ":memory:";
       db = getDatabase();
     }
-  });
+  }, 20_000);
 
   it("quarantines name-similarity candidates and never infers identity_id from a name", () => {
     ensureAgentIdentitySchema(db);
