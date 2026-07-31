@@ -37,7 +37,7 @@
  * a live store too — smaller blast radius than the hosted one, still not this
  * process's to write to.
  */
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyLocalTodosTestEnv } from "../src/testing.js";
@@ -63,3 +63,16 @@ applyLocalTodosTestEnv({
 
 // The restore function is intentionally discarded: this process is a test
 // runner and there is no later phase that should see the ambient routing back.
+
+// Remove the temporary database on the way out so a repeated `bun test` does
+// not leave one directory per run behind in the system temp. Registered with
+// `process.once` rather than in an afterAll hook: the preload has no test
+// lifecycle of its own, and this must also run when the suite exits early.
+// Guarded so a failure to clean can never turn a green suite red.
+process.once("exit", () => {
+  try {
+    rmSync(workerRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
+  } catch {
+    // Best effort: a leaked temp directory is not worth failing a test run over.
+  }
+});
