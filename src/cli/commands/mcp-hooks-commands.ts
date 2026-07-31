@@ -212,28 +212,28 @@ function unregisterCursor(global?: boolean): void {
 // --- Main register/unregister ---
 
 function registerMcp(agent: string, global?: boolean): void {
-  const agents = agent === "all" ? ["claude", "codex", "cursor", "gemini"] : [agent];
+  const agents = agent === "all" ? ["claude", "codex", "gemini", "cursor"] : [agent];
   const binPath = getMcpBinaryPath();
   for (const a of agents) {
     switch (a) {
       case "claude": registerClaude(binPath, global); break;
       case "codex": registerCodex(binPath); break;
-      case "cursor": registerCursor(binPath, global); break;
       case "gemini": registerGemini(binPath); break;
-      default: console.error(chalk.red(`Unknown agent: ${a}. Use: claude, codex, cursor, gemini, all`));
+      case "cursor": registerCursor(binPath, global); break;
+      default: console.error(chalk.red(`Unknown agent: ${a}. Use: claude, codex, gemini, cursor, all`));
     }
   }
 }
 
 function unregisterMcp(agent: string, global?: boolean): void {
-  const agents = agent === "all" ? ["claude", "codex", "cursor", "gemini"] : [agent];
+  const agents = agent === "all" ? ["claude", "codex", "gemini", "cursor"] : [agent];
   for (const a of agents) {
     switch (a) {
       case "claude": unregisterClaude(global); break;
       case "codex": unregisterCodex(); break;
-      case "cursor": unregisterCursor(global); break;
       case "gemini": unregisterGemini(); break;
-      default: console.error(chalk.red(`Unknown agent: ${a}. Use: claude, codex, cursor, gemini, all`));
+      case "cursor": unregisterCursor(global); break;
+      default: console.error(chalk.red(`Unknown agent: ${a}. Use: claude, codex, gemini, cursor, all`));
     }
   }
 }
@@ -323,8 +323,8 @@ exit 0
   program
     .command("mcp")
     .description("Start MCP server (stdio)")
-    .option("--register <agent>", "Register MCP server with an agent (claude, codex, cursor, gemini, all)")
-    .option("--unregister <agent>", "Unregister MCP server from an agent (claude, codex, cursor, gemini, all)")
+    .option("--register <agent>", "Register MCP server with an agent (claude, codex, gemini, cursor, all)")
+    .option("--unregister <agent>", "Unregister MCP server from an agent (claude, codex, gemini, cursor, all)")
     .option("-g, --global", "Register/unregister globally (user-level) instead of project-level")
     .action(async (opts) => {
       if (opts.register) {
