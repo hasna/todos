@@ -476,7 +476,10 @@ export interface Task {
   confidence: number | null;
   reason: string | null;
   spawned_from_session: string | null;
-  assigned_by: string | null; // agent_id who created/assigned this task
+  assigned_by: string | null; // agent_id who handed this task over
+  /** Who FILED this task. Write-once at creation; never mutated by start/claim/steal/update.
+   *  Null on rows created before this field existed — that history is unattributable. */
+  created_by: string | null;
   assigned_from_project: string | null; // project_id the assigning agent was in
   task_type: string | null; // bug, feature, chore, improvement, docs, test, security, or custom
   cost_tokens: number;
@@ -582,6 +585,8 @@ export interface CreateTaskInput {
   reason?: string;
   spawned_from_session?: string;
   assigned_by?: string;
+  /** Who FILED this task. Resolved from the ambient agent identity when the caller omits it. */
+  created_by?: string;
   assigned_from_project?: string;
   task_type?: string;
 }
@@ -603,6 +608,12 @@ export interface UpdateTaskInput {
   priority?: TaskPriority;
   project_id?: string | null;
   assigned_to?: string;
+  /** Repair the agent attributed to this row, or null it out as unattributable.
+   *  There was previously NO write path for this column after creation, so a row
+   *  stamped with the wrong agent at creation could not be corrected by any CLI or
+   *  API call — which is why the 2026-07-31 misattribution had no remedy. This is a
+   *  deliberate repair input: it is never set implicitly by assignment or claim. */
+  agent_id?: string | null;
   working_dir?: string | null;
   plan_id?: string | null;
   task_list_id?: string | null;
@@ -643,6 +654,12 @@ export interface TaskFilter {
   priority?: TaskPriority | TaskPriority[];
   assigned_to?: string;
   agent_id?: string;
+  /** Match tasks FILED by this agent. */
+  created_by?: string;
+  /** Exclude tasks filed by this agent. Combined with `assigned_to` this expresses the
+   *  inbox query operating rule 29 requires: work assigned to me that someone ELSE created.
+   *  Rows with a null `created_by` are unattributable and are NOT excluded. */
+  not_created_by?: string;
   session_id?: string;
   tags?: string[];
   has_recurrence?: boolean;
@@ -951,6 +968,7 @@ export interface TaskRow {
   reason: string | null;
   spawned_from_session: string | null;
   assigned_by: string | null;
+  created_by: string | null;
   assigned_from_project: string | null;
   task_type: string | null;
   cost_tokens: number;

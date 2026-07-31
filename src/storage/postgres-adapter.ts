@@ -26,6 +26,7 @@ import type {
   UpdateTaskInput,
   UpdateTaskListInput,
 } from "../types/index.js";
+import { normalizeAgentNameInput } from "../lib/agent-name-normalize.js";
 import type {
   ActiveWorkItem,
   TodosActiveWorkFilter,
@@ -180,7 +181,7 @@ export function createPostgresTodosStorageAdapter(
     agents: {
       register: (input, context) => registerAgent(input, store, context),
       get: (id) => store.get<Agent>("agents", id),
-      getByName: async (name) => (await store.list<Agent>("agents")).find((agent) => agent.name === name) ?? null,
+      getByName: async (name) => matchAgentByName(await store.list<Agent>("agents"), name),
       list: async (options) => (await store.list<Agent>("agents"))
         .filter((agent) => options?.include_archived || agent.status !== "archived")
         .sort((a, b) => a.name.localeCompare(b.name)),
@@ -378,6 +379,11 @@ class PostgresJsonRecordStore {
     if (filter.priority !== undefined) conds.push(inClause("payload->>'priority'", toFilterArray(filter.priority)));
     if (filter.assigned_to !== undefined) conds.push(`payload->>'assigned_to' = ${p(filter.assigned_to)}`);
     if (filter.agent_id !== undefined) conds.push(`payload->>'agent_id' = ${p(filter.agent_id)}`);
+    // Case-insensitive for the same reason as the SQLite path: write-time
+    // canonicalisation does not reach rows written before it, nor a hand-typed filter.
+    if (filter.created_by !== undefined) conds.push(`LOWER(payload->>'created_by') = LOWER(${p(filter.created_by)})`);
+    // NULL created_by means unattributable, not "someone else" — keep those rows.
+    if (filter.not_created_by !== undefined) conds.push(`(payload->>'created_by' IS NULL OR LOWER(payload->>'created_by') <> LOWER(${p(filter.not_created_by)}))`);
     if (filter.session_id !== undefined) conds.push(`payload->>'session_id' = ${p(filter.session_id)}`);
     if (filter.tags?.length) {
       // ANY-of tag matching, parity with the SQLite path (src/db/task-crud.ts:
@@ -1089,7 +1095,11 @@ async function createTask(input: CreateTaskInput, store: PostgresJsonRecordStore
     description: input.description ?? null,
     status: input.status ?? "pending",
     priority: input.priority ?? "medium",
-    agent_id: input.agent_id ?? null,
+    // The server knows who called it — the API-key principal arrives as
+    // context.agentId. Dropping it here is why agent_id was populated on 8% of
+    // rows and assigned_by on 0%: only clients that passed --agent by hand were
+    // ever attributed.
+    agent_id: input.agent_id ?? context?.agentId ?? null,
     assigned_to: input.assigned_to ?? null,
     session_id: input.session_id ?? context?.sessionId ?? null,
     working_dir: input.working_dir ?? null,
@@ -1114,7 +1124,9 @@ async function createTask(input: CreateTaskInput, store: PostgresJsonRecordStore
     confidence: input.confidence ?? null,
     reason: input.reason ?? null,
     spawned_from_session: input.spawned_from_session ?? null,
-    assigned_by: input.assigned_by ?? null,
+    assigned_by: input.assigned_by ?? input.agent_id ?? context?.agentId ?? null,
+    // created_by — who FILED it. Write-once; the storage update path never touches it.
+    created_by: input.created_by ?? input.agent_id ?? context?.agentId ?? null,
     assigned_from_project: input.assigned_from_project ?? null,
     task_type: input.task_type ?? null,
     cost_tokens: 0,
@@ -1156,6 +1168,11 @@ async function updateTask(id: string, input: UpdateTaskInput, store: PostgresJso
     // making a task un-detachable and re-parenting leave a dangling cross-project
     // reference. Only fall back when the field is absent from the patch.
     task_list_id: input.task_list_id !== undefined ? input.task_list_id : existing.task_list_id,
+    // created_by is write-once. `definedPatch` spreads whatever keys the caller
+    // actually sent — and the /v1 PATCH route forwards the raw request body — so
+    // without this pin an API client could rewrite a task's authorship after the
+    // fact, which would make the field worthless as an audit signal.
+    created_by: existing.created_by,
   };
   await store.upsert("tasks", task);
   return task;
@@ -1592,19 +1609,58 @@ async function updatePlan(id: string, input: UpdatePlanInput, store: PostgresJso
   return store.upsert("plans", { ...plan, ...patch, updated_at: new Date().toISOString() });
 }
 
+/**
+ * Resolve an agent by name, case-insensitively.
+ *
+ * Agent names are a case-INSENSITIVE identity. The SQLite engine has always
+ * enforced this (`validateAgentName` lowercases on the way in, `getAgentByName`
+ * matches on `LOWER(name)`); this adapter compared with `===` and so let one
+ * agent occupy two roster rows — `fabricius` and `Fabricius` — with independent
+ * `last_seen_at`. Both lookups returned success, so nothing reported a fault.
+ *
+ * When historical rows already hold both spellings, the FRESHEST record wins.
+ * That is the safe tie-break rather than an arbitrary one: the caller most
+ * likely to be reading a name is a coordinator deciding whether a dispatched
+ * agent is still alive, and handing it the stale twin makes "kill the live
+ * agent" the rule-following answer. Preferring the freshest row also lets the
+ * defect heal without deleting anyone else's record.
+ */
+function matchAgentByName(
+  agents: readonly Agent[],
+  name: string,
+  options?: { includeArchived?: boolean },
+): Agent | null {
+  const target = normalizeAgentNameInput(name);
+  if (!target) return null;
+  const matches = agents.filter(
+    (agent) =>
+      normalizeAgentNameInput(agent.name) === target &&
+      (options?.includeArchived !== false || agent.status !== "archived"),
+  );
+  if (matches.length === 0) return null;
+  return matches.reduce((freshest, candidate) =>
+    new Date(candidate.last_seen_at).getTime() > new Date(freshest.last_seen_at).getTime()
+      ? candidate
+      : freshest,
+  );
+}
+
 async function registerAgent(
   input: RegisterAgentInput,
   store: PostgresJsonRecordStore,
   context?: TodosStorageContext,
 ): Promise<Agent | { conflict: true; message: string }> {
-  const existing = (await store.list<Agent>("agents")).find((agent) => agent.name === input.name && agent.status !== "archived");
+  const canonicalName = normalizeAgentNameInput(input.name);
+  const existing = matchAgentByName(await store.list<Agent>("agents"), canonicalName, {
+    includeArchived: false,
+  });
   if (existing && !input.force && existing.session_id && existing.session_id !== input.session_id) {
-    return { conflict: true, message: `Agent name '${input.name}' is already active` };
+    return { conflict: true, message: `Agent name '${canonicalName}' is already active` };
   }
   const timestamp = new Date().toISOString();
   const agent: Agent = {
     id: existing?.id ?? randomUUID().slice(0, 8),
-    name: input.name,
+    name: canonicalName,
     description: input.description ?? existing?.description ?? null,
     role: input.role ?? existing?.role ?? null,
     title: input.title ?? existing?.title ?? null,
@@ -1643,7 +1699,7 @@ async function updateAgent(id: string, input: TodosAgentUpdateInput, store: Post
 async function resolveAgent(idOrName: string, store: PostgresJsonRecordStore): Promise<Agent | null> {
   const byId = await store.get<Agent>("agents", idOrName);
   if (byId) return byId;
-  return (await store.list<Agent>("agents")).find((agent) => agent.name === idOrName) ?? null;
+  return matchAgentByName(await store.list<Agent>("agents"), idOrName);
 }
 
 /** Refresh an agent's last_seen_at in the shared cloud roster (heartbeat). */
