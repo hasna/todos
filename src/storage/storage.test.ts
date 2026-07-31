@@ -190,7 +190,7 @@ describe("storage adapter contracts", () => {
     }
   });
 
-  test("heartbeat and release resolve agent names case-insensitively on BOTH storage engines", async () => {
+  test("heartbeat and release resolve agent names case-insensitively on the Postgres roster", async () => {
     // Regression: todos task c543377c, following up 0bf5d979.
     //
     // 0bf5d979 was about last_seen_at DIVERGENCE, and the test above pins only
@@ -218,8 +218,7 @@ describe("storage adapter contracts", () => {
 
     const live = await adapter.agents.register({ name: "fabricius", force: true });
     if ("conflict" in live) throw new Error(live.message);
-    // A DISTINCT agent, registered second so it is the freshest row on the
-    // roster. It is the control for the tie-break below.
+    // A DISTINCT agent, so the resolver has more than one name to choose between.
     const other = await adapter.agents.register({ name: "hermes", force: true });
     if ("conflict" in other) throw new Error(other.message);
 
@@ -230,9 +229,17 @@ describe("storage adapter contracts", () => {
       expect(beat!.id, `heartbeat(${JSON.stringify(spelling)}) must hit the one record`).toBe(live.id);
     }
 
-    // CONTROL — a distinct agent still beats its OWN record. An implementation
-    // that resolved to "the freshest agent" rather than "the freshest agent
-    // WHOSE NAME MATCHES" would pass every assertion above and fail here.
+    // CONTROL — a distinct agent still beats its OWN record, so the resolver
+    // cannot be "return the freshest row" with the name ignored.
+    //
+    // Stated precisely, because the obvious phrasing overstates it (found by
+    // adversarial review of this PR): by the time this line runs, the loop above
+    // has heartbeaten `fabricius` four times, so `fabricius` — not `hermes` — is
+    // usually the freshest row. A name-ignoring resolver therefore dies in the
+    // LOOP, at the assertion above, and only reaches this line in the
+    // same-millisecond registration tie where the timestamps are equal. So this
+    // is a genuine backstop for that tie rather than the primary trap, and the
+    // mutant is caught either way.
     expect((await heartbeat("Hermes"))?.id, "a distinct agent must beat its own record").toBe(other.id);
     expect((await heartbeat("fabricius"))?.id, "and must not have displaced the other agent").toBe(live.id);
 
