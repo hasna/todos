@@ -15,6 +15,7 @@ import type { Agent, CreatePlanInput, CreateTaskListInput, CreateTemplateInput, 
 import { isBlockingDependencyStatus } from "../types/index.js";
 import type { UpdateTemplateInput } from "../storage/interfaces.js";
 import { redactEvidenceText } from "../lib/redaction.js";
+import { normalizeAgentNameInput } from "../lib/agent-name-normalize.js";
 import type { IntegrityReport, IntegrityTaskRow } from "../lib/integrity.js";
 import type { PrGroupEventListOptions, PrGroupEventPage, PrGroupStateView } from "../pr-groups/types.js";
 import { parsePrGroupEventPage, parsePrGroupStateView } from "../pr-groups/http-client.js";
@@ -1370,14 +1371,70 @@ export async function cloudRegisterAgent(client: HasnaStorageClient, input: Regi
 }
 
 /**
+ * Pick the agent a name or id refers to, treating names case-INSENSITIVELY.
+ *
+ * An exact id wins outright. Otherwise every roster row whose normalised name
+ * matches is a candidate and the FRESHEST wins — the same tie-break the storage
+ * engines use (`postgres-adapter.matchAgentByName`). Note the order: candidates
+ * are filtered BY NAME first and only then reduced by recency, so a distinct
+ * agent always resolves to its own row rather than to whichever row happens to
+ * be newest.
+ */
+export function resolveCloudAgentByNameOrId<T extends { id: string; name: string; last_seen_at: string }>(
+  agents: readonly T[],
+  nameOrId: string,
+): T | null {
+  const byId = agents.find((agent) => agent.id === nameOrId);
+  if (byId) return byId;
+  const target = normalizeAgentNameInput(nameOrId);
+  if (!target) return null;
+  const matches = agents.filter((agent) => normalizeAgentNameInput(agent.name) === target);
+  if (matches.length === 0) return null;
+  return matches.reduce((freshest, candidate) =>
+    new Date(candidate.last_seen_at).getTime() > new Date(freshest.last_seen_at).getTime()
+      ? candidate
+      : freshest,
+  );
+}
+
+/**
+ * Turn a user-supplied agent reference into the id the WRITE routes should
+ * address, resolving case-variant names against the roster first.
+ *
+ * Why this exists (todos task c543377c). 0.13.4 made agent-name lookup
+ * case-insensitive on the READ path and left the write path interpolating the
+ * raw input into the URL, where the authority matches it exactly. Heartbeat IS
+ * the write path for `last_seen_at`, so the divergence that 0bf5d979 was filed
+ * against kept being actively produced: `fabricius` and `Fabricius` each
+ * received their own heartbeats, and anyone typing the capital could keep a
+ * STALE TWIN looking alive while the live agent's row aged out.
+ *
+ * On any miss this returns the input UNCHANGED rather than failing. That keeps
+ * the change strictly additive: a nonexistent name still reaches the authority
+ * and still 404s (the fix must not make every name succeed), and a roster read
+ * that is capped, empty, or erroring degrades to exactly the previous behaviour
+ * instead of turning a working heartbeat into an error.
+ */
+async function resolveCloudAgentRef(client: HasnaStorageClient, idOrName: string): Promise<string> {
+  try {
+    const resolved = resolveCloudAgentByNameOrId(await cloudListAgents(client), idOrName);
+    return resolved?.id ?? idOrName;
+  } catch {
+    return idOrName;
+  }
+}
+
+/**
  * Refresh an agent's `last_seen_at` in the shared cloud roster
- * (`POST /v1/agents/:id/heartbeat`). Resolves by id OR name server-side. Returns
- * `null` when the agent does not exist in the cloud roster. This is the fix for
- * the heartbeat misroute: the CLI/MCP used to read LOCAL sqlite and 404 a
- * cloud-only agent ("Agent not found") on a flipped machine.
+ * (`POST /v1/agents/:id/heartbeat`). Resolves by id or name, case-insensitively
+ * (see `resolveCloudAgentRef`). Returns `null` when the agent does not exist in
+ * the cloud roster. This is the fix for the heartbeat misroute: the CLI/MCP used
+ * to read LOCAL sqlite and 404 a cloud-only agent ("Agent not found") on a
+ * flipped machine.
  */
 export async function cloudHeartbeatAgent(client: HasnaStorageClient, idOrName: string): Promise<Agent | null> {
-  const raw = await client.transport.post<unknown>(`/agents/${encodeURIComponent(idOrName)}/heartbeat`, {});
+  const ref = await resolveCloudAgentRef(client, idOrName);
+  const raw = await client.transport.post<unknown>(`/agents/${encodeURIComponent(ref)}/heartbeat`, {});
   if (raw && typeof raw === "object" && "agent" in (raw as Record<string, unknown>)) {
     return (raw as { agent: Agent }).agent;
   }
@@ -1401,8 +1458,12 @@ export async function cloudReleaseAgent(
   idOrName: string,
   sessionId?: string,
 ): Promise<CloudReleaseResult> {
+  // Same write-path case-split as heartbeat (c543377c): releasing `Fabricius`
+  // used to clear the stale twin's session and leave the live agent's binding
+  // held, so the name never actually freed up.
+  const ref = await resolveCloudAgentRef(client, idOrName);
   const raw = await client.transport.post<unknown>(
-    `/agents/${encodeURIComponent(idOrName)}/release`,
+    `/agents/${encodeURIComponent(ref)}/release`,
     sessionId ? { session_id: sessionId } : {},
   );
   const env = (raw ?? {}) as { agent?: Agent; released?: boolean };

@@ -3,7 +3,6 @@ import chalk from "chalk";
 import { execSync } from "node:child_process";
 import { getDatabase, resolvePartialId } from "../../db/database.js";
 import { releaseAgent, listAgents, normalizeGeneratedAgentNames, suggestAgentNames } from "../../db/agents.js";
-import { normalizeAgentNameInput } from "../../lib/agent-name-normalize.js";
 import { createTaskList, getTaskList, listTaskLists, updateTaskList, deleteTaskList } from "../../db/task-lists.js";
 import { listTasks } from "../../db/tasks.js";
 import { getPackageVersion, handleError, autoProject, output } from "../helpers.js";
@@ -21,32 +20,16 @@ import {
   cloudReleaseAgent,
   cloudResolveProjectRef,
   cloudResolveTaskListRef,
+  resolveCloudAgentByNameOrId,
 } from "../cloud-router.js";
 
-/**
- * Resolve an agent from the shared cloud roster by id, or by name
- * case-insensitively — preferring the freshest record when historical rows hold
- * more than one spelling of the same identity (todos task 0bf5d979).
- *
- * `todos agent <name>` is the surface a coordinator reads to decide whether a
- * dispatched agent is still alive, so landing on a stale case-variant here is
- * what turns "check on the worker" into "kill the live worker".
- */
-function resolveCloudAgentByNameOrId<T extends { id: string; name: string; last_seen_at: string }>(
-  agents: readonly T[],
-  nameOrId: string,
-): T | null {
-  const byId = agents.find((agent) => agent.id === nameOrId);
-  if (byId) return byId;
-  const target = normalizeAgentNameInput(nameOrId);
-  const matches = agents.filter((agent) => normalizeAgentNameInput(agent.name) === target);
-  if (matches.length === 0) return null;
-  return matches.reduce((freshest, candidate) =>
-    new Date(candidate.last_seen_at).getTime() > new Date(freshest.last_seen_at).getTime()
-      ? candidate
-      : freshest,
-  );
-}
+// The roster resolver (`resolveCloudAgentByNameOrId`) now lives in cloud-router
+// alongside the WRITE routes that also need it. `todos agent <name>` — the
+// surface a coordinator reads to decide whether a dispatched agent is still
+// alive — and `heartbeat`/`release`, which write `last_seen_at` and the session
+// binding, must agree about which row a name refers to. Keeping two copies of
+// that rule is what let the read path be fixed in 0.13.4 while the write path
+// stayed case-split (todos tasks 0bf5d979, c543377c).
 
 export function registerAgentCommands(program: Command) {
   // init
