@@ -85,11 +85,16 @@ function runnerRoot(bundle: string): { app: string; cache: string; home: string 
   return { app, cache, home };
 }
 
-function runnerEnv(app: string, cache: string, home: string): Record<string, string> {
+function runnerEnv(
+  app: string,
+  cache: string,
+  home: string,
+  options: { unreachableRegistry?: boolean } = {},
+): Record<string, string> {
   // Deliberately NOT process.env: the host's package cache, registry token and
   // TODOS_* credentials must not reach a harness whose whole purpose is to
   // observe what the container can resolve on its own.
-  return {
+  const env: Record<string, string> = {
     PATH: "/usr/bin:/bin",
     HOME: home,
     BUN_INSTALL_CACHE_DIR: cache,
@@ -100,6 +105,21 @@ function runnerEnv(app: string, cache: string, home: string): Record<string, str
     PORT: "0",
     APP_DIR: app,
   };
+
+  if (options.unreachableRegistry) {
+    // The acceptance property is "the container boots with the registry
+    // unreachable". A real network namespace would be the faithful expression
+    // of that, but unprivileged `unshare -rn` is denied on the fleet's stations
+    // (/proc/self/uid_map: Operation not permitted), so this points the
+    // resolver at a dead endpoint instead. It is weaker than --network none —
+    // it blocks the registry, not all egress — and it is stated here rather
+    // than dressed up, because a test that overclaims its isolation is how the
+    // container came to be trusted in the first place.
+    env.BUN_CONFIG_REGISTRY = "http://127.0.0.1:1/";
+    env.NPM_CONFIG_REGISTRY = "http://127.0.0.1:1/";
+  }
+
+  return env;
 }
 
 /** Every bare specifier the bundle still needs, and where each one resolves. */
@@ -137,10 +157,15 @@ function unresolvableSpecifiers(app: string, cache: string, home: string): strin
 }
 
 /** Actually start the bundle the way the image's CMD does. */
-function bootStderr(app: string, cache: string, home: string): string {
+function bootStderr(
+  app: string,
+  cache: string,
+  home: string,
+  options: { unreachableRegistry?: boolean } = {},
+): string {
   const booted = Bun.spawnSync([process.execPath, "dist/server/index.js"], {
     cwd: app,
-    env: runnerEnv(app, cache, home),
+    env: runnerEnv(app, cache, home, options),
     stdout: "pipe",
     stderr: "pipe",
     timeout: 60_000,
@@ -188,6 +213,33 @@ describe("server bundle is self-contained in the runner image", () => {
     const { app, cache, home } = runnerRoot(join(outDir, "index.js"));
 
     const output = bootStderr(app, cache, home);
+    expect(output).toContain("Cannot find module");
+    expect(output).toContain("@hasna/contracts");
+  });
+
+  test("the bundle boots with the package registry unreachable", () => {
+    // deploy-authority-titus's acceptance property, stated in its own terms: a
+    // production image must not need the registry to start. The container has
+    // been fetching its dependency tree from npm on every task start, which is
+    // why a package another team published at 11:23Z could break a todos deploy
+    // at 15:38Z with no todos commit in between.
+    const outDir = mkdtempSync(join(tmpdir(), "todos-offline-"));
+    build(outDir);
+    const { app, cache, home } = runnerRoot(join(outDir, "index.js"));
+
+    const output = bootStderr(app, cache, home, { unreachableRegistry: true });
+    expect(output).not.toContain("Cannot find module");
+    expect(output).toContain("refusing to start");
+  });
+
+  test("POSITIVE CONTROL: an externalized bundle cannot boot without the registry", () => {
+    // Proves the case above is a statement about the bundle and not about the
+    // harness quietly resolving everything from somewhere else.
+    const outDir = mkdtempSync(join(tmpdir(), "todos-offline-external-"));
+    build(outDir, EXTERNALIZE_CONTRACTS);
+    const { app, cache, home } = runnerRoot(join(outDir, "index.js"));
+
+    const output = bootStderr(app, cache, home, { unreachableRegistry: true });
     expect(output).toContain("Cannot find module");
     expect(output).toContain("@hasna/contracts");
   });
