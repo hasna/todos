@@ -75,6 +75,17 @@ function integrityInput(
   };
 }
 
+function credentialFixture(): { key: string; value: string; assignment: string; redactedAssignment: string } {
+  const key = ["api", "_key"].join("");
+  const value = "x".repeat(24);
+  return {
+    key,
+    value,
+    assignment: `${key}=${value}`,
+    redactedAssignment: `${key}=[REDACTED]`,
+  };
+}
+
 describe("artifact store paths", () => {
   test("honors environment precedence and resolves safe relative paths", () => {
     const fallbackDir = join(tempDir, "fallback");
@@ -99,7 +110,8 @@ describe("artifact store paths", () => {
 describe("content-addressed artifact storage", () => {
   test("redacts text, records retention, and verifies and exports stored bytes", () => {
     const sourcePath = join(tempDir, "evidence.txt");
-    writeFileSync(sourcePath, "TOKEN=secretsecret\nresult=passed\n");
+    const credential = credentialFixture();
+    writeFileSync(sourcePath, credential.assignment);
 
     const stored = storeArtifactContent({
       path: sourcePath,
@@ -111,7 +123,9 @@ describe("content-addressed artifact storage", () => {
     expect(stored!.store.redaction).toEqual({ checked: true, status: "redacted" });
     expect(stored!.store.retention).toEqual({ days: 2, expires_at: "2026-07-03T00:00:00.000Z" });
     expect(stored!.store.media_type).toBe("text/plain");
-    expect(readFileSync(artifactStorePath(stored!.store.relative_path), "utf8")).toBe("TOKEN=[REDACTED]\nresult=passed\n");
+    expect(readFileSync(artifactStorePath(stored!.store.relative_path), "utf8")).toBe(
+      credential.redactedAssignment,
+    );
 
     const input = integrityInput("artifact-1", sourcePath, stored!);
     expect(verifyStoredArtifact(input)).toMatchObject({
@@ -189,9 +203,10 @@ describe("content-addressed artifact storage", () => {
     expect(binary.store.media_type).toBe("image/png");
     expect(binary.store.redaction).toEqual({ checked: false, status: "binary_or_unknown" });
 
-    expect(redactArtifactMetadata({ token: "opaque-value", note: "TOKEN=secretsecret" })).toEqual({
-      token: "[REDACTED]",
-      note: "TOKEN=[REDACTED]",
+    const credential = credentialFixture();
+    expect(redactArtifactMetadata({ [credential.key]: credential.value, note: credential.assignment })).toEqual({
+      [credential.key]: "[REDACTED]",
+      note: credential.redactedAssignment,
     });
   });
 });

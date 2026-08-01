@@ -10,6 +10,10 @@ import type { Task } from "../../types/index.js";
 import { createTask, listTasks, getTask, updateTask, upsertTaskByFingerprint, deleteTask } from "../../db/tasks.js";
 import { TaskNotFoundError, VersionConflictError } from "../../types/index.js";
 import { compactJson, compactTask, truncateText } from "../token-utils.js";
+import { resolveCreatorIdentity, resolveWritableIdentity } from "../../lib/creator-identity.js";
+import { validateAssignee } from "../../lib/assignee-validation.js";
+import { loadAssigneeContext } from "../../lib/assignee-context.js";
+import { listAgents } from "../../db/agents.js";
 import {
   getTodosCloudClient,
   cloudCreateTask,
@@ -19,6 +23,7 @@ import {
   cloudDeleteTask,
   cloudResolveProjectRef,
   cloudResolveTaskListRef,
+  cloudListAgents,
 } from "../../cli/cloud-router.js";
 
 interface TaskCrudContext {
@@ -28,6 +33,27 @@ interface TaskCrudContext {
   formatTask: (task: Task) => string;
   formatTaskDetail: (task: Task, maxDescriptionChars?: number) => string;
   getAgentFocus: (agentId: string) => { agent_id: string; project_id?: string } | undefined;
+}
+
+/**
+ * Validate an explicit assignee on the MCP surface.
+ *
+ * The CLI is not the only door. When the previous routing fix landed it had to
+ * be applied here too — the comment in `create_task` records that leaving MCP
+ * on `creator` "kept the whole defect reachable through a second door" — so
+ * this validation is applied on both surfaces in the same change rather than
+ * leaving the MCP to mint the rows the CLI now refuses.
+ *
+ * Throws on refusal; the callers already wrap in try/catch and surface it as
+ * `isError: true`. See `lib/assignee-validation.ts` for why unknown assignees
+ * are permitted and only seats and ambiguous names are refused.
+ */
+async function validateMcpAssignee(value: string, allowSeat: boolean): Promise<string> {
+  const cloud = getTodosCloudClient();
+  const ctx = await loadAssigneeContext(() => (cloud ? cloudListAgents(cloud) : listAgents()), allowSeat);
+  const verdict = validateAssignee(value, ctx);
+  if (!verdict.ok) throw new Error(`Cannot assign to '${value}'. ${verdict.message}`);
+  return verdict.assignee;
 }
 
 export function registerTaskCrudTools(server: McpServer, ctx: TaskCrudContext) {
@@ -72,6 +98,9 @@ export function registerTaskCrudTools(server: McpServer, ctx: TaskCrudContext) {
         project_id: z.string().optional().describe("Project ID"),
         task_list_id: z.string().optional().describe("Task list ID"),
         assigned_to: z.string().optional().describe("Agent ID or name to assign to"),
+        created_by: z.string().optional().describe("Agent who FILED this task. Defaults to the ambient agent identity (todos init / TODOS_AGENT_ID)."),
+        unassigned: z.boolean().optional().describe("Deliberately file with no assignee. Without it, the task defaults to the filer."),
+        allow_seat: z.boolean().optional().describe("Allow assigned_to to name a durable seat. A seat queue has no session watching it, so this must be deliberate."),
         depends_on: z.array(z.string()).optional().describe("Array of task IDs this task depends on"),
         short_id: z.string().nullable().optional().describe("Short ID (auto-generated if not provided, disabled if null)"),
         tags: z.array(z.string()).optional().describe("Tags for the task"),
@@ -83,14 +112,28 @@ export function registerTaskCrudTools(server: McpServer, ctx: TaskCrudContext) {
       },
       async (params) => {
         try {
-          const { depends_on, assigned_to, project_id, task_list_id, tags, estimate, confidence, retry_count, deadline, ...rest } = params;
+          const { depends_on, assigned_to, project_id, task_list_id, tags, estimate, confidence, retry_count, deadline, created_by, unassigned, allow_seat, ...rest } = params;
+          const requestedAssignee = assigned_to
+            ? await validateMcpAssignee(assigned_to, Boolean(allow_seat))
+            : undefined;
+          // Same two-part fix as the CLI: record who FILED the task, and make an
+          // unassigned task deliberate rather than the silent default.
+          const creator = resolveCreatorIdentity(created_by);
+          // Same split as the CLI add path: the identity file is keyed on $HOME and is
+          // shared by every agent session on the station, so it may supply provenance
+          // but must never ROUTE. Leaving MCP on `creator` here kept the whole defect
+          // reachable through a second door.
+          const router = resolveWritableIdentity(created_by);
+          const assignee = requestedAssignee || (unassigned ? undefined : router.agent_id || undefined);
           // http authority routing: create straight against <app-host>/v1.
           // Skip local id-resolution (it hits local SQLite); pass ids through so the
           // cloud dataset is authoritative. Reversible: unset the flip env -> local.
           const cloud = getTodosCloudClient();
           if (cloud) {
             const payload: Record<string, unknown> = { ...rest };
-            if (assigned_to) payload.assigned_to = assigned_to;
+            if (creator.agent_id) payload.created_by = creator.agent_id;
+            if (router.agent_id) payload.agent_id = payload.agent_id ?? router.agent_id;
+            if (assignee) payload.assigned_to = assignee;
             if (project_id) payload.project_id = project_id;
             if (task_list_id) payload.task_list_id = task_list_id;
             if (depends_on) payload.depends_on = depends_on;
@@ -103,7 +146,9 @@ export function registerTaskCrudTools(server: McpServer, ctx: TaskCrudContext) {
             return { content: [{ type: "text" as const, text: mutationTaskResponse(created) }] };
           }
           const resolved: Record<string, unknown> = { ...rest };
-          if (assigned_to) resolved.assigned_to = resolveAssignee(assigned_to);
+          if (creator.agent_id) resolved.created_by = creator.agent_id;
+          if (router.agent_id) resolved.agent_id = resolved.agent_id ?? router.agent_id;
+          if (assignee) resolved.assigned_to = resolveAssignee(assignee);
           if (project_id) resolved.project_id = resolveId(project_id, "projects");
           if (task_list_id) resolved.task_list_id = resolveId(task_list_id, "task_lists");
           if (depends_on) resolved.depends_on = depends_on.map(resolveId);
@@ -137,6 +182,7 @@ export function registerTaskCrudTools(server: McpServer, ctx: TaskCrudContext) {
         project_id: z.string().optional().describe("Project ID"),
         task_list_id: z.string().optional().describe("Task list ID"),
         assigned_to: z.string().optional().describe("Agent ID or name to assign to"),
+        allow_seat: z.boolean().optional().describe("Allow assigned_to to name a durable seat. A seat queue has no session watching it, so this must be deliberate."),
         tags: z.array(z.string()).optional().describe("Tags for the task"),
         working_dir: z.string().optional().describe("Working directory associated with the task"),
         metadata: z.record(z.unknown()).optional().describe("Metadata object to shallow-merge"),
@@ -151,7 +197,7 @@ export function registerTaskCrudTools(server: McpServer, ctx: TaskCrudContext) {
       },
       async (params) => {
         try {
-          const { assigned_to, project_id, task_list_id, metadata, expectation_id, expectation_fingerprint, evidence_paths, origin_loop_id, origin_run_id, expected, observed, acceptance, ...rest } = params;
+          const { assigned_to, allow_seat: _allowSeatUpsert, project_id, task_list_id, metadata, expectation_id, expectation_fingerprint, evidence_paths, origin_loop_id, origin_run_id, expected, observed, acceptance, ...rest } = params;
           const mergedMetadata: Record<string, unknown> = { ...(metadata ?? {}) };
           if (expectation_id !== undefined) mergedMetadata["expectation_id"] = expectation_id;
           if (expectation_fingerprint !== undefined) mergedMetadata["expectation_fingerprint"] = expectation_fingerprint;
@@ -163,7 +209,11 @@ export function registerTaskCrudTools(server: McpServer, ctx: TaskCrudContext) {
           if (acceptance !== undefined) mergedMetadata["acceptance"] = acceptance;
 
           const resolved: Record<string, unknown> = { ...rest, metadata: mergedMetadata };
-          if (assigned_to) resolved.assigned_to = resolveAssignee(assigned_to);
+          if (assigned_to) {
+            resolved.assigned_to = resolveAssignee(
+              await validateMcpAssignee(assigned_to, Boolean(params.allow_seat)),
+            );
+          }
           if (project_id) resolved.project_id = resolveId(project_id, "projects");
           if (task_list_id) resolved.task_list_id = resolveId(task_list_id, "task_lists");
 
@@ -186,6 +236,8 @@ export function registerTaskCrudTools(server: McpServer, ctx: TaskCrudContext) {
         project_id: z.string().optional().describe("Filter by project"),
         task_list_id: z.string().optional().describe("Filter by task list"),
         assigned_to: z.string().optional().describe("Filter by assignee (agent ID or name, empty string = unassigned)"),
+        created_by: z.string().optional().describe("Filter by the agent who FILED the task"),
+        not_created_by: z.string().optional().describe("Exclude tasks filed by this agent. With assigned_to=<me> this is the \"my inbox, minus my own filings\" query."),
         tags: z.array(z.string()).optional().describe("Filter by tags (AND logic)"),
         created_after: z.string().optional().describe("ISO date — tasks created after this date"),
         created_before: z.string().optional().describe("ISO date — tasks created before this date"),
@@ -303,14 +355,20 @@ export function registerTaskCrudTools(server: McpServer, ctx: TaskCrudContext) {
         completed_at: z.string().optional().describe("ISO timestamp for backdating completion"),
         deadline: z.string().nullable().optional(),
         retry_count: z.number().optional(),
+        allow_seat: z.boolean().optional().describe("Allow assigned_to to name a durable seat. A seat queue has no session watching it, so this must be deliberate."),
         version: z.number().optional().describe("Expected version for optimistic locking"),
       },
       async (params) => {
         try {
+          // Validate BEFORE the cloud/local branch so both routes get the same
+          // rule. `null` and `""` both mean unassign and are left alone.
+          if (typeof params.assigned_to === "string" && params.assigned_to !== "") {
+            params.assigned_to = await validateMcpAssignee(params.assigned_to, Boolean(params.allow_seat));
+          }
           const cloud = getTodosCloudClient();
           if (cloud) {
             // http authority routing: PATCH straight against <app-host>/v1.
-            const { task_id, version, estimate, deadline, ...updates } = params;
+            const { task_id, version, estimate, deadline, allow_seat: _allowSeatCloud, ...updates } = params;
             const patch: Record<string, unknown> = { ...updates };
             if (patch.assigned_to === "") patch.assigned_to = null;
             if (estimate !== undefined) patch.estimated_minutes = estimate;
@@ -333,7 +391,7 @@ export function registerTaskCrudTools(server: McpServer, ctx: TaskCrudContext) {
             return { content: [{ type: "text" as const, text: mutationTaskResponse(updated) }] };
           }
           const resolvedId = resolveId(params.task_id);
-          const { task_id, version, ...updates } = params;
+          const { task_id, version, allow_seat: _allowSeatLocal, ...updates } = params;
           const resolved: Record<string, unknown> = { ...updates };
           if (resolved.assigned_to === "") resolved.assigned_to = null;
           if (resolved.assigned_to && typeof resolved.assigned_to === "string") resolved.assigned_to = resolveAssignee(resolved.assigned_to);

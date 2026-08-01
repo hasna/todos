@@ -11,6 +11,18 @@ import {
 import { resetTodosCloudClient } from "./cloud-router.js";
 import { builtCliSpawnBudgetMs } from "../test/spawn-budget.js";
 
+/** `todos add` warns on stderr when a task ends up both unassigned and unattributed —
+ *  that warning is the point of the fix, not incidental noise, so it is stripped here
+ *  rather than tolerated wholesale. Any OTHER stderr output still fails the assertion. */
+function stderrWithoutAttributionWarning(stderr: string): string {
+  return stderr
+    .split("\n")
+    .filter((line) => !line.includes("ownerless and unattributable"))
+    .join("\n")
+    .trim();
+}
+
+
 const REPO_ROOT = join(import.meta.dir, "../..");
 
 /**
@@ -83,11 +95,25 @@ function recursiveInventory(root: string, relative = ""): string[] {
   });
 }
 
+/** Files the CLI may legitimately keep under ~/.hasna/todos in remote mode.
+ *  `identity.json` is client-side session state — "who am I in this shell" — written
+ *  by `todos init` and removed by `todos release`. It carries no task data and is
+ *  not an authority store, so it does not breach the remote-authority boundary.
+ *  Everything else must still be absent. */
+const REMOTE_SAFE_TODOS_HOME_ENTRIES = new Set(["identity.json"]);
+
 function expectNoLocalDatabase(root: string, explicitPath: string): void {
   expect(existsSync(explicitPath)).toBe(false);
   expect(existsSync(join(root, ".todos"))).toBe(false);
   expect(existsSync(join(root, ".hasna", "todos", "todos.db"))).toBe(false);
-  expect(existsSync(join(root, ".hasna", "todos"))).toBe(false);
+  // Assert on the CONTENTS rather than the directory's existence: the old check
+  // used "the directory must not exist" as a proxy for "no local store was
+  // created", which stopped being equivalent once a config file lived there.
+  // Enumerating is strictly tighter — it also catches a stray .db under any name.
+  const todosHome = join(root, ".hasna", "todos");
+  if (!existsSync(todosHome)) return;
+  const unexpected = readdirSync(todosHome).filter((entry) => !REMOTE_SAFE_TODOS_HOME_ENTRIES.has(entry));
+  expect(unexpected).toEqual([]);
 }
 
 function registeredCliNames(): Set<string> {
@@ -254,6 +280,7 @@ describe("remote CLI entrypoint authority boundary", () => {
       ["--agent=fixture-agent", "comment", TASK_FIXTURE_ID, "note"],
       ["history", TASK_FIXTURE_ID],
       ["approve", TASK_FIXTURE_ID],
+      ["complete", TASK_FIXTURE_ID],
       ["bulk", "done", TASK_FIXTURE_ID],
       // Bulk plan reassignment is serviced remotely (shared plan lookup + PATCH
       // per task), so it must not fail closed under remote authority.
@@ -631,7 +658,7 @@ describe("remote CLI entrypoint authority boundary", () => {
         ["--json", "timeline"],
       ]) {
         const result = await runCli(executable, args, env, cwd);
-        expect({ args, exitCode: result.exitCode, stderr: result.stderr }).toEqual({ args, exitCode: 0, stderr: "" });
+        expect({ args, exitCode: result.exitCode, stderr: stderrWithoutAttributionWarning(result.stderr) }).toEqual({ args, exitCode: 0, stderr: "" });
         expect(() => JSON.parse(result.stdout)).not.toThrow();
         expect(recursiveInventory(cwd)).toEqual(before);
         expectNoLocalDatabase(home, localDbPath);
@@ -717,7 +744,7 @@ describe("remote CLI entrypoint authority boundary", () => {
       ]) {
         const requestCount = requests.length;
         const result = await runCli(executable, args, env, cwd);
-        expect({ args, exitCode: result.exitCode, stderr: result.stderr }).toEqual({ args, exitCode: 0, stderr: "" });
+        expect({ args, exitCode: result.exitCode, stderr: stderrWithoutAttributionWarning(result.stderr) }).toEqual({ args, exitCode: 0, stderr: "" });
         // Every variant reaches HTTP (no Stage-A rejection, no local fallback)
         // and the edge read is the FIRST call for the flag combination.
         expect(requests[requestCount]).toBe(`GET /v1/tasks/${TASK_ID}/dependencies`);
@@ -747,7 +774,7 @@ describe("remote CLI entrypoint authority boundary", () => {
     }
   }, 45_000);
 
-  test("built remote done persists every evidence field and rejects invalid confidence before requests", async () => {
+  test("built remote done and complete alias persist completion through /v1", async () => {
     const TASK_ID = "33333333-3333-4333-8333-333333333333";
     const requests: Array<{ method: string; path: string; body: Record<string, unknown> }> = [];
     let advertiseEvidence = false;
@@ -820,7 +847,7 @@ describe("remote CLI entrypoint authority boundary", () => {
     const before = recursiveInventory(cwd);
     try {
       const unsupported = await runCli(executable, [
-        "--json", "done", TASK_ID, "--notes", "must not be dropped",
+        "--agent", "fixture-agent", "--json", "done", TASK_ID, "--notes", "must not be dropped",
       ], env, cwd);
       expect(unsupported.exitCode).toBe(1);
       expect(unsupported.stderr).toContain("REMOTE_COMPLETION_EVIDENCE_UNSUPPORTED");
@@ -855,10 +882,17 @@ describe("remote CLI entrypoint authority boundary", () => {
           confidence: 0.85,
         },
       });
+      const complete = await runCli(executable, ["--agent", "fixture-agent", "--json", "complete", TASK_ID], env, cwd);
+      expect({ exitCode: complete.exitCode, stderr: complete.stderr }).toEqual({ exitCode: 0, stderr: "" });
+      expect(requests[2]).toEqual({
+        method: "POST",
+        path: `/v1/tasks/${TASK_ID}/complete`,
+        body: { agent_id: "fixture-agent" },
+      });
       const invalid = await runCli(executable, ["--json", "done", TASK_ID, "--confidence", "1.5"], env, cwd);
       expect(invalid.exitCode).toBe(1);
       expect(invalid.stderr).toContain("--confidence must be a number between 0.0 and 1.0");
-      expect(requests).toHaveLength(2);
+      expect(requests).toHaveLength(3);
       expect(recursiveInventory(cwd)).toEqual(before);
       expectNoLocalDatabase(home, localDbPath);
     } finally {
@@ -1072,6 +1106,19 @@ describe("remote CLI entrypoint authority boundary", () => {
           }
         }
 
+        // `assign`/`update --assign` validate the assignee against the agent
+        // roster before writing (todos 056f3597), so the remote path now reads
+        // this route. Serving it keeps the NON-degraded validation path under
+        // test: the guard falls back to an empty roster when the fetch fails,
+        // so a fixture that 404'd here would silently exercise only the
+        // degraded branch and prove nothing about the real one.
+        if (url.pathname === "/v1/agents" && request.method === "GET") {
+          return Response.json({
+            agents: [{ id: "fixture-agent", name: "fixture-agent" }],
+            count: 1,
+          });
+        }
+
         return Response.json({ error: `fixture route not present: ${route}` }, { status: 404 });
       },
     });
@@ -1126,8 +1173,14 @@ describe("remote CLI entrypoint authority boundary", () => {
         ["--json", "tag", "REMOTE-1", "urgent"],
         ["--json", "untag", "REMOTE-1", "urgent"],
         ["--json", "comment", "REMOTE-1", "remote comment"],
-        ["--json", "start", "REMOTE-1"],
-        ["--json", "done", "REMOTE-1"],
+        // `--agent` is required on a claim verb (todos cf995f20): `start` used to
+        // fall back to the literal "cli", which every unidentified session on a
+        // station shared as a lock holder. This case asserts that the BUILT CLI
+        // keeps the whole lifecycle on HTTP, not anything about identity, so it
+        // simply supplies one. `done` also releases the named live lock, so it
+        // must carry the same process-bound holder identity.
+        ["--agent", "fixture-agent", "--json", "start", "REMOTE-1"],
+        ["--agent", "fixture-agent", "--json", "done", "REMOTE-1"],
         ["--project", PROJECT_ID, "--json", "next"],
         ["--json", "claim", "fixture-worker"],
       ];
@@ -1140,7 +1193,7 @@ describe("remote CLI entrypoint authority boundary", () => {
 
       const runRemoteOk = async (invocation: string[]): Promise<string> => {
         const result = await runCli(executable, invocation, env, cwd);
-        expect({ invocation, exitCode: result.exitCode, stderr: result.stderr }).toEqual({
+        expect({ invocation, exitCode: result.exitCode, stderr: stderrWithoutAttributionWarning(result.stderr) }).toEqual({
           invocation,
           exitCode: 0,
           stderr: "",
