@@ -508,6 +508,10 @@ export async function handleV1Request(
             ...(url.searchParams.get("task_list_id") ? { task_list_id: url.searchParams.get("task_list_id")! } : {}),
             ...(url.searchParams.get("assigned_to") ? { assigned_to: url.searchParams.get("assigned_to")! } : {}),
             ...(url.searchParams.get("agent_id") ? { agent_id: url.searchParams.get("agent_id")! } : {}),
+            ...(url.searchParams.get("created_by") ? { created_by: url.searchParams.get("created_by")! } : {}),
+            // `assigned_to=<me>&not_created_by=<me>` is the inbox query operating rule 29
+            // requires: work routed to me by someone ELSE, with my own filings dropped.
+            ...(url.searchParams.get("not_created_by") ? { not_created_by: url.searchParams.get("not_created_by")! } : {}),
             // Comma-separated tags; matches tasks carrying ANY of the requested
             // tags (parity with the local CLI's `list --tags`).
             ...(url.searchParams.get("tags") ? {
@@ -656,10 +660,19 @@ export async function handleV1Request(
             const released = await store.tasks.unlock(id);
             return json({ success: released });
           }
-          if (body.agent_id && principal.agent && body.agent_id !== principal.agent && !principal.scopes.includes("todos:*")) {
+          // Authorize with the PRINCIPAL, but compare the holder against the agent the
+          // caller NAMED — the same precedence the lock branch above uses. Resolving
+          // `principal.agent || body.agent_id` here threw the named value away, and since
+          // every station key binds to one shared principal agent ("fleet") the holder was
+          // never the value compared: a named agent could take a lock and never release it.
+          // The gate below is the entitlement check and it fires whenever a caller names an
+          // agent that is not its own principal; todos:* is the delegation scope, and it
+          // already authorizes the strictly stronger force branch above, which releases any
+          // holder's lock without naming one at all.
+          if (body.agent_id && body.agent_id !== principal.agent && !principal.scopes.includes("todos:*")) {
             return error(403, "unlock agent_id must match the authenticated agent");
           }
-          const agentId = principal.agent || body.agent_id;
+          const agentId = body.agent_id || principal.agent;
           if (!agentId) return error(403, "unlock requires an agent-bound key or force=true");
           const released = await store.tasks.unlock(id, agentId);
           return json({ success: released });

@@ -53,7 +53,7 @@ import {
 import { s3CredentialsFromEnv } from "../cli/commands/storage-commands.js";
 import { handleV1Request, type V1RequestDependencies } from "../server/v1.js";
 import type { ApiKeyVerifier } from "@hasna/contracts/auth";
-import type { TaskComment } from "../types/index.js";
+import { LockError, type TaskComment } from "../types/index.js";
 
 let db: Database;
 
@@ -145,6 +145,122 @@ describe("storage adapter contracts", () => {
     const report = await sqlite.integrity!.report();
     expect(report.conditions.map((condition) => condition.id)).toEqual(INTEGRITY_CONDITIONS.map((spec) => spec.id));
     expect(report.conditions.every((condition) => condition.verified)).toBe(true);
+  });
+
+  test("resolves agent names case-insensitively on BOTH storage engines", async () => {
+    // Regression: todos task 0bf5d979. The Postgres/cloud roster compared agent
+    // names with `===`, so registering a case-variant of an existing name minted
+    // a SECOND record instead of heartbeating the first. Measured on station01
+    // 2026-07-31: `fabricius` (01d4cc12, fresh) and `Fabricius` (4d77b218, 24h
+    // stale) were two rows for one agent, and BOTH lookups returned rc=0.
+    //
+    // Why that is not cosmetic: a coordinator deciding whether to REPLACE a
+    // dispatched agent reads last_seen_at. Landing on the stale twin shows 24h of
+    // silence — far past the ~30min replace threshold — so the rule-following
+    // action becomes killing a live agent and discarding its context.
+    //
+    // SQLite already normalised (validateAgentName lowercases, getAgentByName
+    // uses LOWER(name)). Behaviour must be identical on both backends, so this
+    // asserts the contract on each engine rather than on the one that was broken.
+    for (const [engine, adapter] of [
+      ["sqlite", createLocalSqliteTodosStorageAdapter({ db })],
+      ["postgres", createPostgresTodosStorageAdapter({ client: createMemoryPostgresClient().client })],
+    ] as const) {
+      const first = await adapter.agents.register({ name: "fabricius", force: true });
+      if ("conflict" in first) throw new Error(`${engine}: ${first.message}`);
+
+      // Lookup must not care about case.
+      expect(await adapter.agents.getByName("Fabricius"), `${engine}: getByName("Fabricius")`).toMatchObject({ id: first.id });
+      expect(await adapter.agents.getByName("FABRICIUS"), `${engine}: getByName("FABRICIUS")`).toMatchObject({ id: first.id });
+      expect(await adapter.agents.getByName("fabricius"), `${engine}: getByName("fabricius")`).toMatchObject({ id: first.id });
+
+      // Registering a case-variant must reuse the record, never mint a second identity.
+      const again = await adapter.agents.register({ name: "Fabricius", force: true });
+      if ("conflict" in again) throw new Error(`${engine}: ${again.message}`);
+      expect(again.id, `${engine}: case-variant register must reuse the existing id`).toBe(first.id);
+
+      const roster = (await adapter.agents.list()).filter(
+        (agent) => agent.name.toLowerCase() === "fabricius",
+      );
+      expect(roster.length, `${engine}: one agent must occupy exactly one roster row`).toBe(1);
+
+      // The canonical stored form is lowercase, so the roster cannot drift back
+      // into two spellings of one identity.
+      expect(roster[0]!.name, `${engine}: stored name is normalised`).toBe("fabricius");
+    }
+  });
+
+  test("heartbeat and release resolve agent names case-insensitively on the Postgres roster", async () => {
+    // Regression: todos task c543377c, following up 0bf5d979.
+    //
+    // 0bf5d979 was about last_seen_at DIVERGENCE, and the test above pins only
+    // the READ path (`getByName`). But `heartbeat` IS THE WRITE PATH for
+    // last_seen_at, and `release` is the write path for the session binding —
+    // they are what actually produces the divergence a coordinator later reads.
+    // Nothing asserted that they resolve a name the same way, so a refactor that
+    // stopped routing them through `resolveAgent` would restore the original bug
+    // with the read-path test still green.
+    //
+    // Scoped to Postgres deliberately. `heartbeat`/`release` are OPTIONAL on
+    // TodosAgentStore and only the Postgres adapter implements them — a SQLite
+    // server answers /v1/agents/:id/heartbeat with 501. Postgres is also the
+    // engine behind the hosted authority, so it is the one that produces the
+    // shared roster every coordinator reads.
+    const adapter = createPostgresTodosStorageAdapter({ client: createMemoryPostgresClient().client });
+
+    // Assert the capability EXISTS before exercising it. Without this the whole
+    // test would pass vacuously the moment either verb was dropped from the
+    // adapter — which is exactly the regression it is here to catch.
+    expect(typeof adapter.agents.heartbeat, "postgres must implement agents.heartbeat").toBe("function");
+    expect(typeof adapter.agents.release, "postgres must implement agents.release").toBe("function");
+    const heartbeat = adapter.agents.heartbeat!.bind(adapter.agents);
+    const release = adapter.agents.release!.bind(adapter.agents);
+
+    const live = await adapter.agents.register({ name: "fabricius", force: true });
+    if ("conflict" in live) throw new Error(live.message);
+    // A DISTINCT agent, so the resolver has more than one name to choose between.
+    const other = await adapter.agents.register({ name: "hermes", force: true });
+    if ("conflict" in other) throw new Error(other.message);
+
+    // Every casing must beat the SAME record — this is the divergence fix.
+    for (const spelling of ["fabricius", "Fabricius", "FABRICIUS", "  FaBrIcIuS  "]) {
+      const beat = await heartbeat(spelling);
+      expect(beat, `heartbeat(${JSON.stringify(spelling)}) must resolve`).not.toBeNull();
+      expect(beat!.id, `heartbeat(${JSON.stringify(spelling)}) must hit the one record`).toBe(live.id);
+    }
+
+    // CONTROL — a distinct agent still beats its OWN record, so the resolver
+    // cannot be "return the freshest row" with the name ignored.
+    //
+    // Stated precisely, because the obvious phrasing overstates it (found by
+    // adversarial review of this PR): by the time this line runs, the loop above
+    // has heartbeaten `fabricius` four times, so `fabricius` — not `hermes` — is
+    // usually the freshest row. A name-ignoring resolver therefore dies in the
+    // LOOP, at the assertion above, and only reaches this line in the
+    // same-millisecond registration tie where the timestamps are equal. So this
+    // is a genuine backstop for that tie rather than the primary trap, and the
+    // mutant is caught either way.
+    expect((await heartbeat("Hermes"))?.id, "a distinct agent must beat its own record").toBe(other.id);
+    expect((await heartbeat("fabricius"))?.id, "and must not have displaced the other agent").toBe(live.id);
+
+    // CONTROL — a genuinely nonexistent name must STILL fail. The fix must not
+    // work by making every reference resolve to something.
+    expect(await heartbeat("nosuchagent"), "unknown name must not resolve").toBeNull();
+    expect(await release("nosuchagent"), "unknown name must not release").toBeNull();
+
+    // Heartbeating a case-variant must not mint a second row, which is the shape
+    // the original divergence took.
+    const roster = (await adapter.agents.list()).filter((agent) => agent.name.toLowerCase() === "fabricius");
+    expect(roster.length, "heartbeat must not create a case-variant twin").toBe(1);
+
+    // Release shares the resolver and therefore the same contract.
+    const released = await release("FABRICIUS");
+    expect(released?.released, "release must resolve a case-variant").toBe(true);
+    expect(released?.agent.id, "release must clear the LIVE row, not a twin").toBe(live.id);
+    expect(
+      (await adapter.agents.getByName("fabricius"))?.session_id ?? null,
+      "the live row's session binding must be cleared",
+    ).toBeNull();
   });
 
   test("tasks.list/count route a free-text query through FTS on the local adapter", async () => {
@@ -846,6 +962,36 @@ describe("storage adapter contracts", () => {
     const defaultTimestampCompletion = await adapter.tasks.complete(defaultTimestampTask.id, "finisher");
     expect(defaultTimestampCompletion.completed_at).toBe(defaultTimestampCompletion.updated_at);
     expect(postgres.calls).toHaveLength(1);
+  });
+
+  test("Postgres completion refuses no identity and preserves the live lock", async () => {
+    const postgres = createMemoryPostgresClient();
+    const adapter = createPostgresTodosStorageAdapter({ client: postgres.client });
+
+    const task = await adapter.tasks.create({ title: "cloud anonymous completion" });
+    await adapter.tasks.lock!(task.id, "holder-a");
+    expect(await adapter.tasks.get(task.id)).toMatchObject({ status: "pending", locked_by: "holder-a" });
+
+    await expect(Promise.resolve(adapter.tasks.complete(task.id))).rejects.toBeInstanceOf(LockError);
+    expect(await adapter.tasks.get(task.id)).toMatchObject({ status: "pending", locked_by: "holder-a" });
+
+    expect(await adapter.tasks.delete(task.id)).toBe(true);
+    expect(await adapter.tasks.get(task.id)).toBeNull();
+  });
+
+  test("Postgres completion by the legitimate holder releases the live lock", async () => {
+    const postgres = createMemoryPostgresClient();
+    const adapter = createPostgresTodosStorageAdapter({ client: postgres.client });
+
+    const task = await adapter.tasks.create({ title: "cloud holder completion" });
+    await adapter.tasks.lock!(task.id, "holder-a");
+    expect(await adapter.tasks.get(task.id)).toMatchObject({ status: "pending", locked_by: "holder-a" });
+
+    expect(await adapter.tasks.complete(task.id, "holder-a")).toMatchObject({ status: "completed" });
+    expect(await adapter.tasks.get(task.id)).toMatchObject({ status: "completed", locked_by: null, locked_at: null });
+
+    expect(await adapter.tasks.delete(task.id)).toBe(true);
+    expect(await adapter.tasks.get(task.id)).toBeNull();
   });
 
   test("exposes the direct pure remote Postgres adapter factory", async () => {
@@ -2279,10 +2425,23 @@ function createMemoryPostgresClient(): {
       calls.push({ sql, values });
 
       if (sql.includes("todos:complete-task-atomic")) {
-        const [service, taskId, agentId, completedAt, hasEvidence, rawEvidence, hasConfidence, confidence, operationTimestamp] = values;
+        const [service, taskId, agentId, completedAt, hasEvidence, rawEvidence, hasConfidence, confidence, operationTimestamp, lockExpiryCutoff] = values;
         const row = rows.get(recordKey(service, "tasks", taskId));
         if (!row || row.deletedAt) return { rows: [] as T[] };
         const payload = structuredClone(row.payload) as Record<string, unknown>;
+        if (sql.includes("todos:complete-task-lock-guard")) {
+          const lockedBy = typeof payload["locked_by"] === "string" ? payload["locked_by"] as string : null;
+          const lockedAt = typeof payload["locked_at"] === "string" ? payload["locked_at"] as string : null;
+          const live = Boolean(
+            lockedBy && lockedAt && typeof lockExpiryCutoff === "string" &&
+            Date.parse(lockedAt) >= Date.parse(lockExpiryCutoff),
+          );
+          const sameHolder = Boolean(
+            lockedBy && typeof agentId === "string" &&
+            lockedBy.trim().toLowerCase() === agentId.trim().toLowerCase(),
+          );
+          if (live && !sameHolder) return { rows: [] as T[] };
+        }
         const metadata = payload["metadata"] && typeof payload["metadata"] === "object" && !Array.isArray(payload["metadata"])
           ? payload["metadata"] as Record<string, unknown>
           : {};
@@ -2303,6 +2462,10 @@ function createMemoryPostgresClient(): {
         payload["updated_at"] = operationTimestamp;
         payload["version"] = Number(payload["version"] ?? 0) + 1;
         payload["metadata"] = nextMetadata;
+        if (sql.includes("todos:complete-task-clears-lock")) {
+          payload["locked_by"] = null;
+          payload["locked_at"] = null;
+        }
         if (hasConfidence) payload["confidence"] = confidence;
         row.payload = payload;
         row.updatedAt = String(operationTimestamp);

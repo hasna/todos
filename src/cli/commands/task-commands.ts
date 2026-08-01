@@ -38,6 +38,9 @@ import {
 } from "../cloud-router.js";
 import type { CloudTaskRelations } from "../cloud-router.js";
 import type { TaskPriority, TaskStatus } from "../../types/index.js";
+import { canonicalAgentRef, resolveCreatorIdentity, resolveWritableIdentity } from "../../lib/creator-identity.js";
+import { resolveClaimIdentity } from "../claim-guard.js";
+import { resolveValidatedAssignee } from "../assignee-guard.js";
 import {
   formatTaskLine,
   resolveTaskId,
@@ -326,10 +329,48 @@ export function registerTaskCommands(program: Command) {
     .option("--due <date>", "Due date (ISO string or YYYY-MM-DD)")
     .option("--reason <text>", "Why this task exists")
     .option("--project <id>", "Assign to project by ID or slug (overrides auto-detect)")
+    .option("--unassigned", "Deliberately file this task with no assignee")
+    .option("--assign-seat", "Allow --assign to name a durable seat (a seat queue has no session watching it)")
+    .option("--created-by <agent>", "Record a different filer than the resolved agent identity")
     .action(async (title: string, opts) => {
       const globalOpts = program.opts();
       opts.tags = opts.tags || opts.tag;
       opts.list = opts.list || opts.taskList;
+
+      // Who is FILING this task. `todos init` now persists the identity, so a
+      // registered session no longer has to re-supply --agent on every command —
+      // that omission is why creator attribution was empty on 92% of rows.
+      // `creator` may come from the identity file, which is keyed on $HOME and is
+      // therefore shared by every agent session on the station — it names the box,
+      // not the caller. It still supplies `created_by`, which is provenance and is
+      // documented write-once.
+      //
+      // `router` is the narrower one, and the two ROUTING columns take it instead:
+      // only `--agent` and TODOS_AGENT_ID, which travel with the process and cannot
+      // be handed to two concurrent sessions by accident. Stamping the shared file
+      // into `assigned_to` and `agent_id` is what queued one agent's work onto
+      // another — 43+ rows on station01 on 2026-07-31, one of them this fix's own
+      // tracking task.
+      const creator = resolveCreatorIdentity(opts.createdBy || globalOpts.agent);
+      const router = resolveWritableIdentity(opts.createdBy || globalOpts.agent);
+      // Part 2: an unassigned task must be DELIBERATE. Left alone, `todos add`
+      // produced an ownerless row silently, so the filer read "filed and
+      // announced, therefore routed" while no seat was ever queued.
+      // An EXPLICIT --assign is validated against the agent roster before it
+      // reaches the store: unvalidated, it accepted a seat (= nobody), a name
+      // no agent owns, and a name several agents share. See
+      // `lib/assignee-validation.ts`.
+      const requestedAssign = opts.assign
+        ? await resolveValidatedAssignee(opts.assign, Boolean(opts.assignSeat))
+        : undefined;
+      const assignee: string | undefined = requestedAssign || (opts.unassigned ? undefined : router.agent_id || undefined);
+      if (!assignee && !opts.unassigned) {
+        // One line, not two: this fires on every add from an unregistered caller,
+        // and a warning people scroll past is a warning that does not work.
+        console.error(chalk.yellow(
+          "Warning: task is ownerless and unattributable — export TODOS_AGENT_ID=<name> for this session, or pass --agent/--assign <agent> or --unassigned.",
+        ));
+      }
 
       // http authority routing: create straight against <app-host>/v1.
       const cloud = getTodosCloudClient();
@@ -359,10 +400,11 @@ export function registerTaskCommands(program: Command) {
             parent_id: opts.parent ? await resolveTaskIdForCommand(opts.parent, cloud) : undefined,
             tags: opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : undefined,
             plan_id: cloudPlan?.id,
-            assigned_to: opts.assign,
+            assigned_to: assignee,
             status: parseStatus(opts.status),
             task_list_id: cloudTaskListId,
-            agent_id: globalOpts.agent,
+            agent_id: globalOpts.agent || router.agent_id || undefined,
+            created_by: creator.agent_id || undefined,
             session_id: globalOpts.session,
             project_id: cloudProjectId,
             estimated_minutes: opts.estimated !== undefined ? parseIntOption(opts.estimated, "--estimated") : undefined,
@@ -411,10 +453,11 @@ export function registerTaskCommands(program: Command) {
           parent_id: opts.parent ? resolveTaskId(opts.parent) : undefined,
           tags: opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : undefined,
           plan_id: opts.plan ? resolvePlanId(opts.plan) : undefined,
-          assigned_to: opts.assign,
+          assigned_to: assignee,
           status: parseStatus(opts.status),
           task_list_id: taskListId,
-          agent_id: globalOpts.agent,
+          agent_id: globalOpts.agent || router.agent_id || undefined,
+          created_by: creator.agent_id || undefined,
           session_id: globalOpts.session,
           project_id: projectId,
           working_dir: process.cwd(),
@@ -457,6 +500,7 @@ export function registerTaskCommands(program: Command) {
     .option("--working-dir <path>", "Working directory to store on create/update")
     .option("--project <id>", "Assign to project by ID, slug, or path")
     .option("--assign <agent>", "Assign to agent")
+    .option("--assign-seat", "Allow --assign to name a durable seat (a seat queue has no session watching it)")
     .option("--expectation-id <id>", "Expectation metadata ID")
     .option("--expectation-fingerprint <key>", "Expectation metadata fingerprint")
     .option("--evidence-paths <paths>", "Comma-separated evidence paths")
@@ -469,6 +513,12 @@ export function registerTaskCommands(program: Command) {
       const globalOpts = program.opts();
       opts.tags = opts.tags || opts.tag;
       opts.list = opts.list || opts.taskList;
+      // Same validation as `add` and `update`: an upsert is a create path too,
+      // and a loop-driven one, so an unvalidated assignee here mints the same
+      // bad rows on every run rather than once.
+      if (opts.assign) {
+        opts.assign = await resolveValidatedAssignee(opts.assign, Boolean(opts.assignSeat));
+      }
       const explicitProject = opts.project || globalOpts.project;
       // http authority routing: dedupe-and-upsert on the SHARED dataset. The
       // local path wrote the task to this machine's sqlite by fingerprint, so on a
@@ -640,6 +690,9 @@ export function registerTaskCommands(program: Command) {
     .option("-s, --status <status>", "Filter by status")
     .option("-p, --priority <priority>", "Filter by priority")
     .option("--assigned <agent>", "Filter by assigned agent")
+    .option("--created-by <agent>", "Filter by the agent who FILED the task")
+    .option("--not-created-by <agent>", "Exclude tasks filed by this agent")
+    .option("--inbox", "Work assigned to my identity that a DIFFERENT agent filed")
     .option("--tags <tags>", "Filter by tags (comma-separated)")
     .option("--tag <tags>", "Filter by tags (alias for --tags)")
     .option("-a, --all", "Show all tasks (including completed/cancelled)")
@@ -666,7 +719,9 @@ export function registerTaskCommands(program: Command) {
         : cloud
           ? undefined
           : autoProject(globalOpts);
-      const hasAssignedFilter = Boolean(opts.assigned || opts.agentName);
+      // --inbox is an assigned filter too. Omitting it here would auto-scope the
+      // inbox to the cwd's project and silently hide work assigned to me elsewhere.
+      const hasAssignedFilter = Boolean(opts.assigned || opts.agentName || opts.inbox);
       const hasExplicitProjectFilter = Boolean(globalOpts.project || opts.projectName);
       const allowedSortFields = new Set(["updated", "created", "priority", "status"]);
       if (opts.sort && !allowedSortFields.has(opts.sort)) {
@@ -700,6 +755,23 @@ export function registerTaskCommands(program: Command) {
       }
       if (opts.priority) filter["priority"] = opts.priority;
       if (opts.assigned) filter["assigned_to"] = opts.assigned;
+      // A hand-typed `--created-by Cassius` never goes through the identity resolver,
+      // so canonicalise it here too. Both backends also compare case-insensitively —
+      // this is the cheap half, that is the one that reaches rows written before the
+      // resolver was canonicalising at all.
+      if (opts.createdBy) filter["created_by"] = canonicalAgentRef(opts.createdBy);
+      if (opts.notCreatedBy) filter["not_created_by"] = canonicalAgentRef(opts.notCreatedBy);
+      // --inbox is the query operating rule 29 mandates and the store could not
+      // answer until created_by existed: assigned to me, filed by someone else.
+      if (opts.inbox) {
+        const me = resolveCreatorIdentity(program.opts().agent);
+        if (!me.agent_id) {
+          console.error(chalk.red("--inbox needs an agent identity. Run `todos init <name>` or pass --agent <id>."));
+          process.exit(1);
+        }
+        filter["assigned_to"] = me.agent_id;
+        filter["not_created_by"] = me.agent_id;
+      }
       if (opts.tags) filter["tags"] = opts.tags.split(",").map((t: string) => t.trim());
       if (opts.projectName && !cloud) {
         const { listProjects } = require("../../db/projects.js") as any;
@@ -723,7 +795,52 @@ export function registerTaskCommands(program: Command) {
         filter["limit"] = parsedLimit;
       }
 
-      let tasks = cloud ? await cloudListTasks(cloud, filter as any) : listTasks(filter as any);
+      const creatorFilterActive = Boolean(filter["created_by"] || filter["not_created_by"]);
+      // A server that predates created_by IGNORES these query params and returns an
+      // unfiltered list at 200 — measured against the deployed 0.13.0 API, which
+      // drops created_by entirely. So the client must enforce the filter itself.
+      //
+      // But enforcing it AFTER the server applied `limit` reads a truncated page and
+      // then shrinks it further: `--inbox --limit 20` could return 3 rows, or none,
+      // while the real inbox was larger, with nothing to indicate it. So when the
+      // creator filter is client-enforced, the limit is withheld from the request and
+      // applied here instead — filter first, then truncate, which is the order the
+      // SQL does it in.
+      const requestedLimit = filter["limit"] as number | undefined;
+      const serverFilter = creatorFilterActive && cloud && requestedLimit !== undefined
+        ? (() => { const { limit: _dropped, ...rest } = filter; return rest; })()
+        : filter;
+
+      let tasks = cloud ? await cloudListTasks(cloud, serverFilter as any) : listTasks(serverFilter as any);
+      if (cloud && creatorFilterActive) {
+        // Enforcing the filter is not the same as the filter being USEFUL. A server
+        // that predates created_by omits the key entirely, so every row reads as
+        // unattributed and the filter — correctly, per the NULL rule below — excludes
+        // nothing. Measured against the deployed 0.13.0 API: `--inbox` returned the
+        // caller's own filing alongside everyone else's. Silently handing back an
+        // unfiltered inbox is the failure this flag exists to prevent, so say so.
+        // A row where the key is PRESENT and null is genuinely unattributed and is
+        // not a server-capability problem — only a missing key indicates the latter.
+        if (tasks.length > 0 && tasks.every((t) => !("created_by" in (t as object)))) {
+          console.error(chalk.yellow(
+            "Warning: this server does not record task authorship, so the creator filter matched nothing to exclude.\n" +
+            "         Results are unfiltered. The API needs upgrading past the release that added created_by.",
+          ));
+        }
+        const wantCreatedBy = filter["created_by"] as string | undefined;
+        const excludeCreatedBy = filter["not_created_by"] as string | undefined;
+        tasks = tasks.filter((t) => {
+          const raw = (t as { created_by?: string | null }).created_by ?? null;
+          // Case-insensitive, matching the SQL on both backends — a row stored before
+          // write-time canonicalisation carries whatever case it was written with.
+          const author = raw === null ? null : canonicalAgentRef(raw);
+          if (wantCreatedBy && author !== canonicalAgentRef(wantCreatedBy)) return false;
+          // NULL author is unattributable, not "someone else" — keep it.
+          if (excludeCreatedBy && author !== null && author === canonicalAgentRef(excludeCreatedBy)) return false;
+          return true;
+        });
+        if (requestedLimit !== undefined) tasks = tasks.slice(0, requestedLimit);
+      }
       if (opts.dueToday) {
         const todayEnd = new Date(); todayEnd.setHours(23, 59, 59, 999);
         tasks = tasks.filter(t => t.due_at && t.due_at <= todayEnd.toISOString());
@@ -1141,6 +1258,8 @@ export function registerTaskCommands(program: Command) {
     .option("-s, --status <status>", "New status")
     .option("-p, --priority <priority>", "New priority")
     .option("--assign <agent>", "Assign to agent")
+    .option("--assign-seat", "Allow --assign to name a durable seat (a seat queue has no session watching it)")
+    .option("--set-agent <agent>", "Repair the agent_id stamped on this row (use \"\" to clear it as unattributable)")
     .option("--tags <tags>", "New tags (comma-separated)")
     .option("--tag <tags>", "New tags (alias for --tags)")
     .option("--list <id>", "Move to a task list (UUID authoritative; project-scoped slug accepted)")
@@ -1175,6 +1294,12 @@ export function registerTaskCommands(program: Command) {
       if (opts.workingDir !== undefined && opts.clearWorkingDir) {
         handleError(new Error("Use either --working-dir or --clear-working-dir, not both."));
       }
+      // Reassignment is validated on the same terms as the initial assignment:
+      // this is the path that quietly moved a task onto another session's live
+      // agent at rc=0. See `lib/assignee-validation.ts`.
+      if (opts.assign) {
+        opts.assign = await resolveValidatedAssignee(opts.assign, Boolean(opts.assignSeat));
+      }
 
       // http authority routing: PATCH straight against <app-host>/v1.
       const cloud = getTodosCloudClient();
@@ -1197,6 +1322,7 @@ export function registerTaskCommands(program: Command) {
             status: parseStatus(opts.status),
             priority: parsePriority(opts.priority),
             assigned_to: opts.assign,
+            agent_id: opts.setAgent !== undefined ? (opts.setAgent === "" ? null : canonicalAgentRef(opts.setAgent)) : undefined,
             tags: opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : undefined,
             plan_id: plan?.id ?? (opts.clearPlan ? null : undefined),
             ...reparent,
@@ -1240,6 +1366,7 @@ export function registerTaskCommands(program: Command) {
           status: parseStatus(opts.status),
           priority: parsePriority(opts.priority),
           assigned_to: opts.assign,
+          agent_id: opts.setAgent !== undefined ? (opts.setAgent === "" ? null : canonicalAgentRef(opts.setAgent)) : undefined,
           tags: opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : undefined,
           plan_id: planId,
           ...reparent,
@@ -1336,7 +1463,10 @@ export function registerTaskCommands(program: Command) {
   // done
   program
     .command("done <id>")
-    .description("Mark a task as completed")
+    // `complete` mirrors the MCP `complete_task` verb, which the agent rule
+    // corpus tells agents to use; without it they hit an unknown-command error.
+    .alias("complete")
+    .description("Mark a task as completed (alias: complete)")
     .option("--attach-ids <ids>", "Comma-separated @hasna/attachments IDs to link as evidence")
     .option("--files-changed <files>", "Comma-separated list of files changed")
     .option("--test-results <results>", "Test results summary")
@@ -1364,10 +1494,12 @@ export function registerTaskCommands(program: Command) {
       };
       const cloud = getTodosCloudClient();
       if (cloud) {
+        const resolvedId = await resolveTaskIdForCommand(id, cloud);
+        const agentId = resolveClaimIdentity("complete", globalOpts.agent);
         let task;
         try {
-          task = await cloudCompleteTask(cloud, await resolveTaskIdForCommand(id, cloud), {
-            ...(globalOpts.agent ? { agent_id: globalOpts.agent } : {}),
+          task = await cloudCompleteTask(cloud, resolvedId, {
+            agent_id: agentId,
             ...completionOptions,
           });
         } catch (e) {
@@ -1382,9 +1514,10 @@ export function registerTaskCommands(program: Command) {
         return;
       }
       const resolvedId = resolveTaskId(id);
+      const agentId = resolveClaimIdentity("complete", globalOpts.agent);
       let task;
       try {
-        task = completeTask(resolvedId, globalOpts.agent, undefined, completionOptions);
+        task = completeTask(resolvedId, agentId, undefined, completionOptions);
       } catch (e) {
         handleError(e);
       }
@@ -1455,12 +1588,20 @@ export function registerTaskCommands(program: Command) {
     .description("Claim, lock, and start a task")
     .action(async (id: string) => {
       const globalOpts = program.opts();
-      const agentId = globalOpts.agent || "cli";
       const cloud = getTodosCloudClient();
       let task;
+      // The task REFERENCE is resolved before the claim identity, and the order is
+      // load-bearing rather than incidental. An ambiguous short id must keep
+      // failing closed with its candidate project IDs — the diagnostic every other
+      // mutating verb reports — instead of being masked by an identity refusal.
+      // Resolving identity first regressed exactly that case while `done`,
+      // `update` and `comment` continued to report it, which is the kind of
+      // silent inconsistency that makes a safety diagnostic untrustworthy.
       if (cloud) {
+        const cloudResolvedId = await resolveTaskIdForCommand(id, cloud);
+        const agentId = resolveClaimIdentity("start", globalOpts.agent);
         try {
-          task = await cloudTaskAction(cloud, await resolveTaskIdForCommand(id, cloud), "start", { agent_id: agentId });
+          task = await cloudTaskAction(cloud, cloudResolvedId, "start", { agent_id: agentId });
         } catch (e) {
           handleError(e);
         }
@@ -1473,6 +1614,7 @@ export function registerTaskCommands(program: Command) {
         return;
       }
       const resolvedId = resolveTaskId(id);
+      const agentId = resolveClaimIdentity("start", globalOpts.agent);
       try {
         task = startTask(resolvedId, agentId);
       } catch (e) {
@@ -1493,9 +1635,12 @@ export function registerTaskCommands(program: Command) {
     .description("Acquire exclusive lock on a task")
     .action(async (id: string) => {
       const globalOpts = program.opts();
-      const agentId = globalOpts.agent || "cli";
       const cloud = getTodosCloudClient();
+      // Reference before identity, for the same reason as `start` above: an
+      // ambiguous or unknown id must report its own error rather than an
+      // identity refusal.
       const resolvedId = cloud ? await resolveTaskIdForCommand(id, cloud) : resolveTaskId(id);
+      const agentId = resolveClaimIdentity("lock", globalOpts.agent);
       let result;
       try {
         // http authority routing: lock on the SHARED dataset so every agent
@@ -1522,9 +1667,10 @@ export function registerTaskCommands(program: Command) {
       const globalOpts = program.opts();
       const cloud = getTodosCloudClient();
       const resolvedId = cloud ? await resolveTaskIdForCommand(id, cloud) : resolveTaskId(id);
+      const agentId = resolveClaimIdentity("unlock", globalOpts.agent);
       try {
-        if (cloud) await cloudUnlockTask(cloud, resolvedId, globalOpts.agent, !globalOpts.agent);
-        else unlockTask(resolvedId, globalOpts.agent);
+        if (cloud) await cloudUnlockTask(cloud, resolvedId, agentId);
+        else unlockTask(resolvedId, agentId);
       } catch (e) {
         handleError(e);
       }
@@ -1603,6 +1749,12 @@ export function registerTaskCommands(program: Command) {
       if (!knownActions.has(action)) {
         handleError(new Error(`Unknown action: ${action}. Use: done, start, delete, plan (alias: move-plan)`));
       }
+      // Resolved ONCE, before either loop: `bulk start` is still a claim, and a
+      // missing identity is a property of the session rather than of any one row.
+      // Refusing per-row would report N identical failures for a single cause —
+      // and the per-id `catch` below turns exceptions into row results, so a
+      // refusal raised inside it would be recorded as a partial success.
+      const bulkClaimAgentId = action === "start" ? resolveClaimIdentity("start", globalOpts.agent) : undefined;
 
       // http authority routing: run each op against the SHARED dataset. The local
       // path resolved ids against this machine's sqlite — `bulk done` threw
@@ -1640,7 +1792,7 @@ export function registerTaskCommands(program: Command) {
             if (action === "done" || action === "complete") {
               await cloudCompleteTask(cloud, resolvedId, { ...(globalOpts.agent ? { agent_id: globalOpts.agent } : {}) });
             } else if (action === "start") {
-              await cloudTaskAction(cloud, resolvedId, "start", { agent_id: globalOpts.agent || "cli" });
+              await cloudTaskAction(cloud, resolvedId, "start", { agent_id: bulkClaimAgentId! });
             } else if (action === "delete") {
               await cloudDeleteTask(cloud, resolvedId);
             } else {
@@ -1677,7 +1829,7 @@ export function registerTaskCommands(program: Command) {
             completeTask(resolvedId, globalOpts.agent);
             results.push({ id: resolvedId, success: true });
           } else if (action === "start") {
-            startTask(resolvedId, globalOpts.agent || "cli");
+            startTask(resolvedId, bulkClaimAgentId!);
             results.push({ id: resolvedId, success: true });
           } else if (action === "delete") {
             deleteTask(resolvedId);
