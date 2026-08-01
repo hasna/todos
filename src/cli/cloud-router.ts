@@ -372,11 +372,8 @@ function classifyRemoteRequestError(baseUrl: string, route: string, error: unkno
     const body = error && typeof error === "object" ? (error as { body?: unknown }).body : undefined;
     if (body && typeof body === "object" && !Array.isArray(body)) {
       const remoteError = body as { error?: unknown; code?: unknown };
-      if (typeof remoteError.error === "string" && remoteError.error.length > 0) {
-        const prefix = typeof remoteError.code === "string" && remoteError.code.length > 0
-          ? `${remoteError.code}: `
-          : "";
-        throw new Error(`${prefix}${remoteError.error}`, { cause: error });
+      if (remoteError.code === "TASK_NOT_STARTABLE" && typeof remoteError.error === "string" && remoteError.error.length > 0) {
+        throw new Error(`${remoteError.code}: ${remoteError.error}`, { cause: error });
       }
     }
     throw error;
