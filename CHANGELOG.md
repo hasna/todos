@@ -40,6 +40,20 @@ published to npm; `0.13.12` is the version this supersedes.
 - Registering an agent through the hosted path no longer mints a case variant of an
   existing name. This closes the remaining write path that could recreate the
   split-identity condition 0.13.12 fixed on the read side.
+- **The MCP `rename_agent` and `rebalance_workload` tools now leave an ambiguous
+  case-variant assignee alone instead of resolving it arbitrarily.** Where a database
+  holds two distinct agents whose names differ only by case — the same split-identity
+  condition the entry above closes at its source — `rename_agent` matched `assigned_to`
+  case-insensitively and therefore moved *both* agents' tasks onto the renamed one, and
+  `rebalance_workload` indexed both roster rows under one lower-cased key, attributing
+  those tasks to whichever row happened to be indexed last. `rename_agent` now widens to
+  a case-insensitive match only when the old name uniquely identifies the agent being
+  renamed, and uses an exact match when it does not; `rebalance_workload` marks a
+  colliding alias ambiguous and skips those assignments rather than guessing. The
+  observable difference on a database carrying such a collision is that `rename_agent`
+  reports fewer updated tasks and `rebalance_workload` reports fewer moves — that is the
+  wrong work no longer being done. Behaviour is unchanged where agent names do not
+  collide, which is why this is not marked breaking.
 - Multi-value task filters are now modelled correctly in the generated API schema,
   so generated clients emit the repeated query parameters the server accepts.
 
