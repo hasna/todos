@@ -123,6 +123,11 @@ export function registerAgentCommands(program: Command) {
         // This is the agent-identity misroute fix — a flipped machine's `init`
         // used to write the agent locally only, invisible to the cloud fleet.
         const cloud = getTodosCloudClient();
+        // The guard compares the trimmed spelling, so registration must send
+        // that same spelling. Sending the original value would let an exact
+        // restart such as `  zoilus  ` pass the guard and mint a whitespace
+        // variant on an older exact-match cloud authority.
+        const registrationName = name.trim();
         if (cloud) {
           // Degrade OPEN on a roster read failure, with the cost stated on
           // stderr. Same precedent as `loadSeatSlugs` in assignee-validation:
@@ -136,7 +141,7 @@ export function registerAgentCommands(program: Command) {
               "Warning: could not read the shared roster, so the case-variant check was skipped for this registration.",
             ));
           }
-          const variants = roster ? findCaseVariantRows(roster, name) : [];
+          const variants = roster ? findCaseVariantRows(roster, registrationName) : [];
           if (variants.length > 0) {
             const listed = variants.map((a) => `${a.name} (${a.id})`).join(", ");
             console.error(chalk.red(
@@ -149,8 +154,8 @@ export function registerAgentCommands(program: Command) {
           }
         }
         const result = cloud
-          ? await cloudRegisterAgent(cloud, { name, description: opts.description })
-          : (await import("../../db/agents.js")).registerAgent({ name, description: opts.description });
+          ? await cloudRegisterAgent(cloud, { name: registrationName, description: opts.description })
+          : (await import("../../db/agents.js")).registerAgent({ name: registrationName, description: opts.description });
         const { isAgentConflict } = await import("../../db/agents.js");
         if (isAgentConflict(result)) {
           console.error(chalk.red("CONFLICT:"), result.message);
