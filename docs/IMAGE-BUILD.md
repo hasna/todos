@@ -98,6 +98,44 @@ confusion this document exists to resolve.
   has no path to production traffic. Deploying the resulting candidate is a
   separate, later decision by whoever owns that rollout.
 
+## Adopting `ecr-candidate.yml` for another repository
+
+A fleet-wide sweep (`agent-chief-operations`, 2026-08-02) found 18 of 23
+hosted services have an npm version ahead of their container image — this is
+not a `hasna/todos`-specific gap, it is the fleet's default state, and todos
+is simply the instance someone looked at first. This workflow was written so
+a second repository can adopt it by changing configuration, not by
+reverse-engineering and rewriting the step bodies:
+
+- **Repository name, local build tag, and the SLSA `buildType` URL** are all
+  derived at runtime from `GITHUB_REPOSITORY` — nothing in the step bodies
+  hardcodes `todos`.
+- **The expected Bun version** is read directly off the target repo's own
+  `Dockerfile` (the `oven/bun:<version>-alpine` pin), so the check can never
+  drift from what that Dockerfile actually builds.
+- **ECR repository, AWS region, and the IAM role ARN** come from three GitHub
+  Actions repository variables (`ECR_REPOSITORY`, `AWS_REGION`,
+  `AWS_ROLE_ARN`) on an Environment named `ecr-candidate` — set once per repo,
+  never edited into the workflow file itself.
+
+To adopt it: copy `.github/workflows/ecr-candidate.yml` unchanged into the
+target repo, confirm that repo's Dockerfile has a build stage literally named
+`runner` (or edit the one `--target runner` reference if it doesn't), create
+that repo's own narrowly-scoped IAM role (see "Provisioned alongside this PR"
+above for the exact shape — **do not reuse the `todos` role's ARN**, ECR push
+access must stay scoped to one repository per role), flip that repo's ECR
+image tag mutability to `IMMUTABLE` if it isn't already, and set the three
+Environment variables.
+
+**What this PR does not do:** build a shared, centrally-maintained reusable
+workflow (`workflow_call`) that every repo references instead of copying.
+That is a real option and probably the right end state once a few repos have
+adopted the copy-paste version and the shape has proven stable — but it is a
+different, larger change (a new home for the shared workflow, a version/pinning
+policy for it, and a blast radius of "every repo using it" instead of one),
+and it belongs to whoever owns the fleet-wide image-build convention, not to
+a fix scoped to `hasna/todos`.
+
 ## Why `workflow_dispatch` only, not "on every merge to main"
 
 This is the first automation of a pipeline that has been entirely hand-run

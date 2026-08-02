@@ -20,6 +20,18 @@ name: ECR candidate
 #
 # This workflow builds and pushes an image candidate ONLY. It does not deploy,
 # does not touch ECS, and does not move any `latest`-style pointer.
+#
+# ADOPTING THIS FOR ANOTHER REPOSITORY: every value that is repo-specific is
+# either derived at runtime (repository name, Bun version — read straight off
+# this repo's own Dockerfile, so it can never drift from what actually gets
+# built) or comes from the GitHub Actions Environment named `ecr-candidate`
+# (`vars.AWS_REGION`, `vars.AWS_ROLE_ARN`, `vars.ECR_REPOSITORY`). Nothing in
+# the step bodies below hardcodes this repository's name. To adopt this file
+# elsewhere: copy it unchanged, create that repo's own IAM role (narrowly
+# scoped to ITS OWN ECR repository only — do not reuse this role's ARN), set
+# the three Environment variables to point at it, and confirm the target
+# Dockerfile has a build stage literally named `runner` (or change the one
+# `--target runner` reference below to match).
 
 on:
   workflow_dispatch:
@@ -94,6 +106,12 @@ jobs:
           printf 'SHORT_SHA=%s\n' "${short_sha}" >> "${GITHUB_ENV}"
           printf 'CANDIDATE_TAG=%s\n' "${candidate_tag}" >> "${GITHUB_ENV}"
 
+          # Derived from the repository this workflow is running in, never
+          # hardcoded — this is the one thing that makes the file copy-paste
+          # adoptable across repos without editing step bodies.
+          local_image_name="$(basename "${GITHUB_REPOSITORY}")-candidate"
+          printf 'LOCAL_IMAGE_NAME=%s\n' "${local_image_name}" >> "${GITHUB_ENV}"
+
       - name: Checkout requested commit
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -123,9 +141,9 @@ jobs:
             --load \
             --label "org.opencontainers.image.revision=${SOURCE_SHA}" \
             --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
-            --tag "todos-candidate:${SOURCE_SHA}" \
+            --tag "${LOCAL_IMAGE_NAME}:${SOURCE_SHA}" \
             .
-          local_image_id="$(docker image inspect --format '{{.Id}}' "todos-candidate:${SOURCE_SHA}")"
+          local_image_id="$(docker image inspect --format '{{.Id}}' "${LOCAL_IMAGE_NAME}:${SOURCE_SHA}")"
           if [[ ! "${local_image_id}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "built image did not produce a valid local image id" >&2
             exit 1
@@ -136,14 +154,21 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          # Read the expected Bun version straight off this repo's own
+          # Dockerfile (the ARG the base image is pinned to) rather than
+          # hardcoding it here, so this check can never drift from what the
+          # Dockerfile actually builds — on this repo or any other that
+          # adopts this workflow unchanged.
+          expected_bun_version="$(grep -oP '(?<=oven/bun:)[0-9]+\.[0-9]+\.[0-9]+' Dockerfile | head -1)"
+          test -n "${expected_bun_version}"
           expected_version="$(node -e "console.log(require('./package.json').version)" 2>/dev/null || python3 -c "import json;print(json.load(open('package.json'))['version'])")"
-          test "$(docker run --rm --entrypoint bun "todos-candidate:${SOURCE_SHA}" --version)" = "1.3.14"
-          test "$(docker run --rm --entrypoint bun "todos-candidate:${SOURCE_SHA}" dist/server/index.js --version)" = "${expected_version}"
+          test "$(docker run --rm --entrypoint bun "${LOCAL_IMAGE_NAME}:${SOURCE_SHA}" --version)" = "${expected_bun_version}"
+          test "$(docker run --rm --entrypoint bun "${LOCAL_IMAGE_NAME}:${SOURCE_SHA}" dist/server/index.js --version)" = "${expected_version}"
 
       - name: Generate local vulnerability report
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: todos-candidate:${{ inputs.source_sha }}
+          image-ref: ${{ env.LOCAL_IMAGE_NAME }}:${{ inputs.source_sha }}
           format: json
           output: trivy-local.json
           scanners: vuln
@@ -171,9 +196,9 @@ jobs:
       - name: Generate CycloneDX SBOM
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: todos-candidate:${{ inputs.source_sha }}
+          image-ref: ${{ env.LOCAL_IMAGE_NAME }}:${{ inputs.source_sha }}
           format: cyclonedx
-          output: todos-candidate.sbom.cdx.json
+          output: ${{ env.LOCAL_IMAGE_NAME }}.sbom.cdx.json
           scanners: vuln
           vuln-type: os,library
           exit-code: "0"
@@ -183,7 +208,7 @@ jobs:
         with:
           aws-region: ${{ vars.AWS_REGION }}
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          role-session-name: todos-ecr-${{ github.run_id }}
+          role-session-name: ${{ env.LOCAL_IMAGE_NAME }}-${{ github.run_id }}
           role-duration-seconds: 1800
           mask-aws-account-id: true
           unset-current-credentials: true
@@ -228,7 +253,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           image_uri="${ECR_REGISTRY}/${ECR_REPOSITORY}:${CANDIDATE_TAG}"
-          docker tag "todos-candidate:${SOURCE_SHA}" "${image_uri}"
+          docker tag "${LOCAL_IMAGE_NAME}:${SOURCE_SHA}" "${image_uri}"
           docker push "${image_uri}"
 
           remote_digest=""
@@ -352,7 +377,7 @@ jobs:
               predicateType: "https://slsa.dev/provenance/v1",
               predicate: {
                 buildDefinition: {
-                  buildType: "https://github.com/hasna/todos/.github/workflows/ecr-candidate.yml",
+                  buildType: ("https://github.com/" + $repository + "/.github/workflows/ecr-candidate.yml"),
                   externalParameters: {
                     sourceSha: $source_sha,
                     dockerfile: "Dockerfile",
@@ -370,7 +395,7 @@ jobs:
                   metadata: {invocationId: ($run_id + ":" + $run_attempt)}
                 }
               }
-            }' > todos-candidate.provenance.json
+            }' > "${LOCAL_IMAGE_NAME}.provenance.json"
 
       - name: Upload candidate evidence
         if: ${{ always() }}
@@ -379,8 +404,8 @@ jobs:
           name: ecr-candidate-${{ github.run_id }}
           path: |
             trivy-local.json
-            todos-candidate.sbom.cdx.json
-            todos-candidate.provenance.json
+            ${{ env.LOCAL_IMAGE_NAME }}.sbom.cdx.json
+            ${{ env.LOCAL_IMAGE_NAME }}.provenance.json
             ecr-scan-counts.json
           if-no-files-found: warn
           retention-days: 30
@@ -391,7 +416,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           {
-            echo "## todos ECR candidate"
+            echo "## ${GITHUB_REPOSITORY} ECR candidate"
             echo
             echo "- source SHA: \`${SAFE_SOURCE_SHA:-invalid}\`"
             echo "- immutable tag: \`${CANDIDATE_TAG:-not-created}\`"
