@@ -21,11 +21,12 @@ published to npm; `0.13.12` is the version this supersedes.
   case is a `--status` word that is not one of `pending`, `in_progress`, `completed`,
   `failed`, `cancelled` — previously produced a clean empty list that was
   indistinguishable from "no tasks matched", so a typo read as a true negative. The
-  CLI now exits non-zero and names the accepted vocabulary, and `GET /v1/tasks` now
-  answers **400** where it previously answered 200 with an empty list —
-  `?status=open` is the canonical example. Any script or API client that depended on
-  the silent-empty behaviour will start failing loudly; that is the intent. HTTP
-  callers are in scope: an earlier draft of this note said "CLI" only.
+  CLI now exits non-zero and names the accepted vocabulary, and three HTTP endpoints
+  now answer **400** where they previously answered 200 with an empty list:
+  `GET /v1/tasks` validates `status` and `priority`, and `GET /api/tasks` and
+  `GET /api/tasks/export` validate `status`. `?status=open` is the canonical
+  example. Any script or API client that depended on the silent-empty behaviour
+  will start failing loudly; that is the intent.
 
 ### Fixed
 
@@ -63,7 +64,7 @@ published to npm; `0.13.12` is the version this supersedes.
   characters or more as a full UUID and looks it up on the `id` column, so it reports
   "not unique" for every agent name that long even when no collision exists. Such an
   agent's differently-cased task rows are now left on the stale name after a rename.
-  Eight of 1,295 registered names are that long today. Tracked as a follow-up.
+  Tracked as a follow-up.
 - Multi-value task filters are now modelled correctly in the generated API schema
   (`style: form`, `explode: false`), so generated clients emit the **comma-separated
   single parameter** the server actually reads — `?status=pending,in_progress`. The
