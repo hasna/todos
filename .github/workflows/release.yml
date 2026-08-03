@@ -2,18 +2,25 @@ name: Release npm package
 
 # npm trusted publishing is bound to this workflow by FILENAME (release.yml)
 # and to the `npm-release` environment declared on the job below. Both strings
-# are recorded on npm's side as part of the trusted-publisher configuration for
-# @hasna/todos. Renaming either one silently de-authorises publishing: the
-# binding stops matching, and the publish step fails with an auth error that
-# does not mention the rename. Change them only together with `npm trust`.
+# are already recorded on npm's side as the trusted-publisher configuration for
+# @hasna/todos. They are NOT free choices: renaming either one silently
+# de-authorises publishing, because the binding stops matching, and the failure
+# surfaces as an auth error that never mentions the rename. Change them only
+# together with `npm trust`.
+#
+# Provenance is generated automatically by npm under trusted publishing, with
+# one condition that is easy to miss: npm does NOT generate provenance for
+# PRIVATE repositories, even when the package itself is public. hasna/todos is
+# public (measured), so it holds here. If this repository is ever made private,
+# provenance stops being produced and this workflow will not tell you.
 
 on:
   push:
     tags:
       - "npm/todos/v*"
-  # A dry run exercises every gate, and the OIDC token mint, without
-  # publishing. This workflow has never run, so there is a manual way to prove
-  # the wiring before a real release depends on it.
+  # A dry run exercises every gate and the OIDC token mint without publishing.
+  # This workflow has never run, so there is a way to prove the wiring before a
+  # real release depends on it.
   workflow_dispatch:
     inputs:
       dry_run:
@@ -85,7 +92,13 @@ jobs:
             echo "manual run: ${pkg_name}@${pkg_version} from ${GITHUB_REF_NAME}"
             exit 0
           fi
-          tag_version="${GITHUB_REF_NAME#npm/todos/v}"
+          case "${GITHUB_REF_NAME}" in
+            npm/todos/v*)
+              tag_version="${GITHUB_REF_NAME#npm/todos/v}" ;;
+            *)
+              echo "::error::tag ${GITHUB_REF_NAME} does not match a recognised release tag prefix"
+              exit 1 ;;
+          esac
           if [ "${tag_version}" != "${pkg_version}" ]; then
             echo "::error::tag ${GITHUB_REF_NAME} carries version ${tag_version} but package.json declares ${pkg_version}"
             exit 1
@@ -106,20 +119,14 @@ jobs:
           fi
           echo "${name}@${version} is not yet published"
 
-      # The repository's own gates, run as separate steps so a failure names
-      # which gate failed. `bun test` does not invoke tsc, so typecheck is its
-      # own step and not implied by the suite.
+      # `bun test` does not invoke tsc in this repository, so typecheck is its
+      # own step rather than something the suite implies.
       - name: Typecheck
         run: bun run typecheck
 
       - name: No-cloud release guards
         run: bun run test:no-cloud
 
-      # --retry=2 mirrors this repository's ci.yml and its recorded rationale:
-      # the suite shells out to the real CLI in hundreds of subprocess tests
-      # that each open a SQLite/WAL handle, and transient SQLITE_BUSY under
-      # parallel load fails a random single test that passes on re-run.
-      # Deterministic failures still surface.
       - name: Test
         run: bun test --retry=2
 
@@ -146,8 +153,6 @@ jobs:
             if resolved="$(npm view "${name}@${version}" version 2>/dev/null)"; then
               if [ "${resolved}" = "${version}" ]; then
                 echo "registry serves ${name}@${resolved}"
-                npm view "${name}@${version}" --json > /tmp/published.json || true
-                node -e "const m=require('/tmp/published.json');console.log('dist.attestations:',JSON.stringify(m.dist&&m.dist.attestations||null));" || true
                 exit 0
               fi
               echo "::error::registry resolved ${name}@${version} to ${resolved}"
