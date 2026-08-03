@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { getDatabase, closeDatabase, resetDatabase, resolvePartialId } from "../db/database.js";
 import { registerAgent } from "../db/agents.js";
 import { createProject } from "../db/projects.js";
-import { listTasks } from "../db/tasks.js";
+import { createTask, listTasks } from "../db/tasks.js";
 import type { Task } from "../types/index.js";
 import { applyFocus } from "./index.js";
 import { registerTaskCrudTools } from "./tools/task-crud.js";
@@ -194,6 +194,40 @@ describe("MCP create_task applies focus", () => {
     await createTool().handler({ title: "mcp focused task" });
 
     expect(onlyTask("mcp focused task").project_id).toBe(project.id);
+  });
+
+  it("sends the caller's focus project to the HTTP authority", async () => {
+    const project = createProject({ name: "Remote focused project", path: "/tmp/remote-focused-project" });
+    const explicitProject = createProject({ name: "Explicit remote project", path: "/tmp/explicit-remote-project" });
+    registerAgent({ name: "cassius", session_id: "remote-focus-session", project_id: project.id });
+    process.env["TODOS_AGENT_ID"] = "cassius";
+    process.env["HASNA_TODOS_STORAGE_MODE"] = "http";
+    process.env["TODOS_STORAGE_MODE"] = "http";
+    process.env["HASNA_TODOS_API_URL"] = "https://todos.example.test";
+    process.env["HASNA_TODOS_API_KEY"] = "nonsecret-test-value";
+
+    const responseTask = createTask({ title: "remote response" });
+    const postedBodies: Array<Record<string, unknown>> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (_input, init = {}) => {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      postedBodies.push(body);
+      return new Response(JSON.stringify({ task: { ...responseTask, ...body } }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    try {
+      await createTool().handler({ title: "remote focused task" });
+      await createTool().handler({ title: "explicit remote task", project_id: explicitProject.id });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(postedBodies).toHaveLength(2);
+    expect(postedBodies[0]?.["project_id"]).toBe(project.id);
+    expect(postedBodies[1]?.["project_id"]).toBe(explicitProject.id);
   });
 });
 

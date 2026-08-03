@@ -143,6 +143,7 @@ export function registerTaskCrudTools(server: McpServer, ctx: TaskCrudContext) {
             if (confidence !== undefined) payload.confidence = confidence;
             if (retry_count !== undefined) payload.max_retries = retry_count;
             if (deadline) payload.due_at = deadline;
+            applyFocus(payload, router.agent_id || undefined);
             const created = await cloudCreateTask(cloud, payload);
             return { content: [{ type: "text" as const, text: mutationTaskResponse(created) }] };
           }
