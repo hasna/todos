@@ -33,6 +33,7 @@ interface TaskCrudContext {
   formatTask: (task: Task) => string;
   formatTaskDetail: (task: Task, maxDescriptionChars?: number) => string;
   getAgentFocus: (agentId: string) => { agent_id: string; project_id?: string } | undefined;
+  applyFocus: (params: Record<string, any>, agentId?: string) => void;
 }
 
 /**
@@ -57,7 +58,7 @@ async function validateMcpAssignee(value: string, allowSeat: boolean): Promise<s
 }
 
 export function registerTaskCrudTools(server: McpServer, ctx: TaskCrudContext) {
-  const { shouldRegisterTool, resolveId, formatError, formatTask } = ctx;
+  const { shouldRegisterTool, resolveId, formatError, formatTask, applyFocus } = ctx;
 
   function mutationTaskResponse(task: Task): string {
     const compact = compactTask(task, 240);
@@ -157,6 +158,7 @@ export function registerTaskCrudTools(server: McpServer, ctx: TaskCrudContext) {
           if (confidence !== undefined) resolved.confidence = confidence;
           if (retry_count !== undefined) resolved.max_retries = retry_count;
           if (deadline) resolved.due_at = deadline;
+          applyFocus(resolved, router.agent_id || undefined);
 
           const task = createTask(resolved as Parameters<typeof createTask>[0]);
           return { content: [{ type: "text" as const, text: mutationTaskResponse(task) }] };

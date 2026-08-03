@@ -3,8 +3,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getDatabase, closeDatabase, resetDatabase, resolvePartialId } from "../db/database.js";
+import { registerAgent } from "../db/agents.js";
+import { createProject } from "../db/projects.js";
 import { listTasks } from "../db/tasks.js";
 import type { Task } from "../types/index.js";
+import { applyFocus } from "./index.js";
 import { registerTaskCrudTools } from "./tools/task-crud.js";
 import { persistIdentity } from "../lib/creator-identity.js";
 import { resetConfig } from "../lib/config.js";
@@ -61,6 +64,7 @@ function captureTools(register: (server: any, ctx: any) => void): Map<string, Ca
     formatTask: (task: Task) => `${task.id.slice(0, 8)} ${task.status} ${task.priority} ${task.title}`,
     formatTaskDetail: (task: Task) => `${task.id} ${task.title}`,
     getAgentFocus: () => undefined,
+    applyFocus,
     agentFocusMap: new Map(),
   };
   register(server, ctx);
@@ -178,6 +182,18 @@ describe("MCP create_task records the filer", () => {
     const task = onlyTask("mcp routed");
     expect(task.created_by).toBe("cassius");
     expect(task.assigned_to).toBe("brutus");
+  });
+});
+
+describe("MCP create_task applies focus", () => {
+  it("uses the caller's focus project when create_task omits project_id", async () => {
+    const project = createProject({ name: "Focused project", path: "/tmp/focused-project" });
+    registerAgent({ name: "cassius", session_id: "focus-session", project_id: project.id });
+    process.env["TODOS_AGENT_ID"] = "cassius";
+
+    await createTool().handler({ title: "mcp focused task" });
+
+    expect(onlyTask("mcp focused task").project_id).toBe(project.id);
   });
 });
 
