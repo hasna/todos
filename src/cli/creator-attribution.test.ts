@@ -118,14 +118,24 @@ describe("todos comment — records who wrote it", () => {
 
   it("is unattributable — null, not a plausible guess — with no flag and no environment", async () => {
     const task = await addJson(["a task to comment on"], { TODOS_AGENT_ID: "cassius" });
-    const comment = await commentJson(task.id, "anonymous progress note");
+    // The comment call under test must not inherit the runner's own ambient
+    // TODOS_AGENT_ID/HASNA_TODOS_AGENT_ID (runCli's env starts from process.env via
+    // localRoutingTestEnv, and neither var is in SHARED_TODOS_STORE_ENV_KEYS) — blank
+    // both explicitly so "no environment" is actually no environment.
+    const comment = await commentJson(task.id, "anonymous progress note", {
+      TODOS_AGENT_ID: "",
+      HASNA_TODOS_AGENT_ID: "",
+    });
     expect(comment.agent_id).toBeNull();
   });
 
   it("does not attribute from the station-shared identity file, matching `add`", async () => {
     expect((await runCli(["init", "Cassius"])).exitCode).toBe(0);
     const task = await addJson(["a task to comment on"]);
-    const comment = await commentJson(task.id, "should stay unattributed");
+    const comment = await commentJson(task.id, "should stay unattributed", {
+      TODOS_AGENT_ID: "",
+      HASNA_TODOS_AGENT_ID: "",
+    });
     expect(comment.agent_id).toBeNull();
   });
 });
