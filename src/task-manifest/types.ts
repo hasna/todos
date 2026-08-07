@@ -1,11 +1,12 @@
 import type { Database } from "bun:sqlite";
 import type { TodosPostgresQueryClient } from "../storage/postgres-sync.js";
+import type { TaskPriority, TaskStatus } from "../types/index.js";
 
 export const TODOS_TASK_MANIFEST_ROUTE = "todos.task-manifest.v1" as const;
 export const TODOS_TASK_MANIFEST_SCHEMA_VERSION = 1 as const;
 
-export type TodosTaskManifestStatus = "pending" | "in_progress" | "blocked" | "completed" | "cancelled" | "failed";
-export type TodosTaskManifestPriority = "low" | "medium" | "high" | "urgent";
+export type TodosTaskManifestStatus = TaskStatus;
+export type TodosTaskManifestPriority = TaskPriority;
 export type TodosTaskManifestVerificationStatus = "passed" | "failed" | "unknown";
 
 export interface TodosTaskManifestComment {

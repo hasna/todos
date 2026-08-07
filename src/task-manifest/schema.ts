@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { TASK_PRIORITIES, TASK_STATUSES } from "../types/index.js";
 import {
   TodosTaskManifestError,
   type TodosTaskManifest,
@@ -48,8 +49,8 @@ const task = z.object({
   key,
   title: z.string().min(1).max(500),
   description: z.string().max(64_000).optional(),
-  status: z.enum(["pending", "in_progress", "blocked", "completed", "cancelled", "failed"]).optional(),
-  priority: z.enum(["low", "medium", "high", "urgent"]).optional(),
+  status: z.enum(TASK_STATUSES).optional(),
+  priority: z.enum(TASK_PRIORITIES).optional(),
   assigned_to: identifier.optional(),
   created_by: identifier.optional(),
   tags: z.array(z.string().min(1).max(100)).max(64).optional(),

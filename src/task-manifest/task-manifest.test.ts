@@ -69,6 +69,14 @@ describe("task-manifest SQLite authority", () => {
       .toThrow(TodosTaskManifestError);
     expect(() => parseTodosTaskManifest({
       ...manifest(),
+      tasks: [{ ...manifest().tasks[0], status: "blocked" }],
+    })).toThrow(/tasks\.0\.status/);
+    expect(() => parseTodosTaskManifest({
+      ...manifest(),
+      tasks: [{ ...manifest().tasks[0], priority: "urgent" }],
+    })).toThrow(/tasks\.0\.priority/);
+    expect(() => parseTodosTaskManifest({
+      ...manifest(),
       dependencies: [{ task: "events_emails", depends_on: "outside" }],
     })).toThrow(/foreign task key/);
     expect(() => parseTodosTaskManifest({
@@ -90,6 +98,23 @@ describe("task-manifest SQLite authority", () => {
       if_binding_version: 1,
     })).toThrow(TodosTaskManifestError);
     expect(db.query("SELECT count(*) AS count FROM plans").get()).toEqual({ count: 0 });
+  });
+
+  test("accepts and persists the canonical terminal status and critical priority", async () => {
+    const input = manifest("canonical-task-enums");
+    input.tasks[0] = {
+      ...input.tasks[0]!,
+      status: "failed",
+      priority: "critical",
+    };
+    const parsed = parseTodosTaskManifest(input);
+    expect(parsed.tasks[0]?.status).toBe("failed");
+    expect(parsed.tasks[0]?.priority).toBe("critical");
+
+    const authority = createSqliteTodosTaskManifestAuthority({ database: db });
+    const applied = await authority.apply(parsed);
+    expect(db.query("SELECT status, priority FROM tasks WHERE id = ?").get(applied.graph.task_ids.design))
+      .toEqual({ status: "failed", priority: "critical" });
   });
 
   test("creates the closed graph with deterministic IDs, exact readback, receipts, and outbox", async () => {
