@@ -141,4 +141,73 @@ describe.skipIf(!PG_URL)("task-manifest PostgreSQL authority", () => {
     expect(Number(receipts.rows[0]?.count)).toBe(0);
     expect(Number(bindings.rows[0]?.count)).toBe(0);
   });
+
+  test("refuses before foreign CASCADE or SET NULL reference surfaces can be changed", async () => {
+    const cascade = await authority.apply(manifest("foreign-cascade"));
+    const checklistId = crypto.randomUUID();
+    await client!.query(`INSERT INTO todos_sync_records (
+      service, object_type, object_id, payload, updated_at, deleted_at, version
+    ) VALUES ($1, 'task_checklists', $2, $3::jsonb, now(), NULL, 1)`, [
+      SERVICE,
+      checklistId,
+      {
+        id: checklistId,
+        task_id: cascade.graph.task_ids.one,
+        text: "Foreign checklist evidence",
+      },
+    ]);
+    await expect(authority.compensate({
+      receipt_id: cascade.receipt.receipt_id,
+      idempotency_key: `${cascade.receipt.operation_id}:compensate`,
+      if_binding_version: cascade.receipt.binding_version,
+    })).rejects.toThrow(/foreign reference in task_checklists/i);
+    const checklist = await client!.query<{ task_id: string }>(`SELECT payload->>'task_id' AS task_id
+      FROM todos_sync_records WHERE service = $1 AND object_type = 'task_checklists' AND object_id = $2`,
+    [SERVICE, checklistId]);
+    expect(checklist.rows[0]?.task_id).toBe(cascade.graph.task_ids.one);
+
+    const setNull = await authority.apply(manifest("foreign-set-null"));
+    const snapshotId = crypto.randomUUID();
+    const boardId = crypto.randomUUID();
+    await client!.query(`INSERT INTO todos_sync_records (
+      service, object_type, object_id, payload, updated_at, deleted_at, version
+    ) VALUES
+      ($1, 'context_snapshots', $2, $3::jsonb, now(), NULL, 1),
+      ($1, 'task_boards', $4, $5::jsonb, now(), NULL, 1)`, [
+      SERVICE,
+      snapshotId,
+      {
+        id: snapshotId,
+        task_id: setNull.graph.task_ids.one,
+        snapshot_type: "checkpoint",
+      },
+      boardId,
+      {
+        id: boardId,
+        plan_id: setNull.graph.plan_id,
+        name: "Foreign board",
+      },
+    ]);
+    await expect(authority.compensate({
+      receipt_id: setNull.receipt.receipt_id,
+      idempotency_key: `${setNull.receipt.operation_id}:task-compensate`,
+      if_binding_version: setNull.receipt.binding_version,
+    })).rejects.toThrow(/foreign reference in context_snapshots/i);
+    const snapshot = await client!.query<{ task_id: string }>(`SELECT payload->>'task_id' AS task_id
+      FROM todos_sync_records WHERE service = $1 AND object_type = 'context_snapshots' AND object_id = $2`,
+    [SERVICE, snapshotId]);
+    expect(snapshot.rows[0]?.task_id).toBe(setNull.graph.task_ids.one);
+
+    await client!.query(`DELETE FROM todos_sync_records
+      WHERE service = $1 AND object_type = 'context_snapshots' AND object_id = $2`, [SERVICE, snapshotId]);
+    await expect(authority.compensate({
+      receipt_id: setNull.receipt.receipt_id,
+      idempotency_key: `${setNull.receipt.operation_id}:plan-compensate`,
+      if_binding_version: setNull.receipt.binding_version,
+    })).rejects.toThrow(/foreign reference in task_boards/i);
+    const board = await client!.query<{ plan_id: string }>(`SELECT payload->>'plan_id' AS plan_id
+      FROM todos_sync_records WHERE service = $1 AND object_type = 'task_boards' AND object_id = $2`,
+    [SERVICE, boardId]);
+    expect(board.rows[0]?.plan_id).toBe(setNull.graph.plan_id);
+  });
 });

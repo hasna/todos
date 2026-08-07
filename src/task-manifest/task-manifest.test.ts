@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { runMigrations } from "../db/schema.js";
+import { addChecklistItem } from "../db/checklists.js";
 import {
   TodosTaskManifestError,
   createSqliteTodosTaskManifestAuthority,
@@ -172,6 +173,64 @@ describe("task-manifest SQLite authority", () => {
       if_binding_version: clean.receipt.binding_version,
     });
     expect(duplicate.duplicate).toBe(true);
+  });
+
+  test("refuses before a supported checklist CASCADE can delete the foreign row", async () => {
+    const authority = createSqliteTodosTaskManifestAuthority({ database: db });
+    const applied = await authority.apply(manifest("foreign-checklist-reference"));
+    const checklist = addChecklistItem({
+      task_id: applied.graph.task_ids.design,
+      text: "Foreign checklist evidence",
+    }, db);
+
+    await expect(authority.compensate({
+      receipt_id: applied.receipt.receipt_id,
+      idempotency_key: "foreign-checklist-reference:compensate",
+      if_binding_version: applied.receipt.binding_version,
+    })).rejects.toThrow(/foreign reference at task_checklists\.task_id would be changed by CASCADE/i);
+
+    expect(db.query("SELECT task_id FROM task_checklists WHERE id = ?").get(checklist.id))
+      .toEqual({ task_id: applied.graph.task_ids.design });
+    expect(db.query("SELECT count(*) AS count FROM tasks WHERE id IN (?, ?)").get(
+      applied.graph.task_ids.design,
+      applied.graph.task_ids.events_emails,
+    )).toEqual({ count: 2 });
+  });
+
+  test("refuses before task and plan SET NULL surfaces can detach foreign rows", async () => {
+    const authority = createSqliteTodosTaskManifestAuthority({ database: db });
+    const applied = await authority.apply(manifest("foreign-set-null-references"));
+    const snapshotId = crypto.randomUUID();
+    db.run(
+      "INSERT INTO context_snapshots (id, task_id, snapshot_type) VALUES (?, ?, 'checkpoint')",
+      [snapshotId, applied.graph.task_ids.design],
+    );
+    const boardId = crypto.randomUUID();
+    db.run(
+      "INSERT INTO task_boards (id, name, plan_id) VALUES (?, ?, ?)",
+      [boardId, `foreign-board-${boardId}`, applied.graph.plan_id],
+    );
+
+    await expect(authority.compensate({
+      receipt_id: applied.receipt.receipt_id,
+      idempotency_key: "foreign-set-null-references:task-compensate",
+      if_binding_version: applied.receipt.binding_version,
+    })).rejects.toThrow(/foreign reference at context_snapshots\.task_id would be changed by SET NULL/i);
+    expect(db.query("SELECT task_id FROM context_snapshots WHERE id = ?").get(snapshotId))
+      .toEqual({ task_id: applied.graph.task_ids.design });
+
+    db.run("DELETE FROM context_snapshots WHERE id = ?", [snapshotId]);
+    await expect(authority.compensate({
+      receipt_id: applied.receipt.receipt_id,
+      idempotency_key: "foreign-set-null-references:plan-compensate",
+      if_binding_version: applied.receipt.binding_version,
+    })).rejects.toThrow(/foreign reference at task_boards\.plan_id would be changed by SET NULL/i);
+    expect(db.query("SELECT plan_id FROM task_boards WHERE id = ?").get(boardId))
+      .toEqual({ plan_id: applied.graph.plan_id });
+    expect(db.query("SELECT count(*) AS count FROM tasks WHERE id IN (?, ?)").get(
+      applied.graph.task_ids.design,
+      applied.graph.task_ids.events_emails,
+    )).toEqual({ count: 2 });
   });
 
   test("refuses compensation after a same-count managed-row mutation", async () => {

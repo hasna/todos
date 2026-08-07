@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { canonicalDigest, canonicalJson } from "./canonical.js";
 import type { NormalizedTaskManifest, PreparedTaskManifestFaults, TodosTaskManifestBackend } from "./backend.js";
+import { findSqliteTaskManifestForeignReference } from "./reference-guard.js";
 import { sqliteTodosTaskManifestSchemaSql } from "./schema-sql.js";
 import {
   TodosTaskManifestError,
@@ -255,22 +256,19 @@ export class SqliteTodosTaskManifestBackend implements TodosTaskManifestBackend 
       }
       const taskIds = Object.values(applyResult.graph.task_ids);
       const placeholders = taskIds.map(() => "?").join(",");
-      const foreignDependency = this.db.query(`SELECT 1 AS found FROM task_dependencies
-        WHERE (task_id IN (${placeholders}) AND depends_on NOT IN (${placeholders}))
-           OR (depends_on IN (${placeholders}) AND task_id NOT IN (${placeholders})) LIMIT 1`).get(...taskIds, ...taskIds, ...taskIds, ...taskIds);
-      if (foreignDependency) throw new TodosTaskManifestError("TODOS_TASK_MANIFEST_COMPENSATION_REFUSED", "Compensation refused: foreign reference gained");
-      const extraTask = this.db.query(`SELECT 1 AS found FROM tasks WHERE plan_id = ? AND id NOT IN (${placeholders}) LIMIT 1`).get(applyResult.graph.plan_id, ...taskIds);
-      if (extraTask) throw new TodosTaskManifestError("TODOS_TASK_MANIFEST_COMPENSATION_REFUSED", "Compensation refused: foreign task gained");
-      const foreignComment = this.db.query(`SELECT 1 AS found FROM task_comments
-        WHERE task_id IN (${placeholders}) AND id NOT IN (${applyResult.graph.comment_ids.map(() => "?").join(",") || "NULL"}) LIMIT 1`).get(
-        ...taskIds, ...applyResult.graph.comment_ids,
-      );
-      const foreignVerification = this.db.query(`SELECT 1 AS found FROM task_verifications
-        WHERE task_id IN (${placeholders}) AND id NOT IN (${applyResult.graph.verification_ids.map(() => "?").join(",") || "NULL"}) LIMIT 1`).get(
-        ...taskIds, ...applyResult.graph.verification_ids,
-      );
-      if (foreignComment || foreignVerification) {
-        throw new TodosTaskManifestError("TODOS_TASK_MANIFEST_COMPENSATION_REFUSED", "Compensation refused: foreign task evidence gained");
+      const foreignReference = findSqliteTaskManifestForeignReference(this.db, {
+        plan_id: applyResult.graph.plan_id,
+        task_ids: taskIds,
+        dependency_ids: applyResult.graph.dependency_ids,
+        comment_ids: applyResult.graph.comment_ids,
+        verification_ids: applyResult.graph.verification_ids,
+      });
+      if (foreignReference) {
+        throw new TodosTaskManifestError(
+          "TODOS_TASK_MANIFEST_COMPENSATION_REFUSED",
+          `Compensation refused: foreign reference at ${foreignReference.surface}.${foreignReference.field} would be changed by ${foreignReference.on_delete}`,
+          { ...foreignReference },
+        );
       }
       const actualReadback = this.readback(applyResult.graph);
       if (canonicalJson(actualReadback) !== canonicalJson(applyResult.readback)) {

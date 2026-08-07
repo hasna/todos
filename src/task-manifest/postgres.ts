@@ -1,5 +1,6 @@
 import { canonicalDigest, canonicalJson } from "./canonical.js";
 import type { NormalizedTaskManifest, PreparedTaskManifestFaults, TodosTaskManifestBackend } from "./backend.js";
+import { postgresTaskManifestForeignReferenceSql } from "./reference-guard.js";
 import { postgresTodosTaskManifestSchemaSql } from "./schema-sql.js";
 import { DEFAULT_TODOS_POSTGRES_SYNC_TABLE, postgresTodosSyncSchemaSql, type TodosPostgresQueryClient } from "../storage/postgres-sync.js";
 import {
@@ -340,32 +341,25 @@ export class PostgresTodosTaskManifestBackend implements TodosTaskManifestBacken
         }
       }
       const taskIds = Object.values(applyResult.graph.task_ids);
-      const taskRefs = placeholders(2, taskIds.length);
-      const foreignDependency = await tx.query(`SELECT object_id FROM ${this.tableName}
-        WHERE service = $1 AND object_type = 'dependencies' AND deleted_at IS NULL AND (
-          ((payload->>'task_id') IN (${taskRefs}) AND (payload->>'depends_on') NOT IN (${taskRefs}))
-          OR ((payload->>'depends_on') IN (${taskRefs}) AND (payload->>'task_id') NOT IN (${taskRefs}))
-        ) LIMIT 1`, [this.service, ...taskIds]);
-      if (foreignDependency.rows[0]) throw new TodosTaskManifestError("TODOS_TASK_MANIFEST_COMPENSATION_REFUSED", "Compensation refused: foreign reference gained");
-      const extraTask = await tx.query(`SELECT object_id FROM ${this.tableName}
-        WHERE service = $1 AND object_type = 'tasks' AND deleted_at IS NULL
-          AND payload->>'plan_id' = $2 AND object_id NOT IN (${placeholders(3, taskIds.length)}) LIMIT 1`,
-      [this.service, applyResult.graph.plan_id, ...taskIds]);
-      if (extraTask.rows[0]) throw new TodosTaskManifestError("TODOS_TASK_MANIFEST_COMPENSATION_REFUSED", "Compensation refused: foreign task gained");
-      for (const [objectType, managedEvidenceIds] of [
-        ["comments", applyResult.graph.comment_ids],
-        ["verifications", applyResult.graph.verification_ids],
-      ] as const) {
-        const notManaged = managedEvidenceIds.length
-          ? `AND object_id NOT IN (${placeholders(2 + taskIds.length, managedEvidenceIds.length)})`
-          : "";
-        const foreignEvidence = await tx.query(`SELECT object_id FROM ${this.tableName}
-          WHERE service = $1 AND object_type = '${objectType}' AND deleted_at IS NULL
-            AND payload->>'task_id' IN (${placeholders(2, taskIds.length)}) ${notManaged} LIMIT 1`,
-        [this.service, ...taskIds, ...managedEvidenceIds]);
-        if (foreignEvidence.rows[0]) {
-          throw new TodosTaskManifestError("TODOS_TASK_MANIFEST_COMPENSATION_REFUSED", "Compensation refused: foreign task evidence gained");
-        }
+      const foreignReference = await tx.query<JsonRecord>(
+        postgresTaskManifestForeignReferenceSql(this.tableName),
+        [
+          this.service,
+          applyResult.graph.plan_id,
+          taskIds,
+          applyResult.graph.dependency_ids,
+          applyResult.graph.comment_ids,
+          applyResult.graph.verification_ids,
+          [applyResult.graph.plan_id, ...taskIds],
+        ],
+      );
+      if (foreignReference.rows[0]) {
+        const row = foreignReference.rows[0];
+        throw new TodosTaskManifestError(
+          "TODOS_TASK_MANIFEST_COMPENSATION_REFUSED",
+          `Compensation refused: foreign reference in ${String(row["object_type"])}:${String(row["object_id"])} would be changed`,
+          row,
+        );
       }
       const actualReadback = await this.readback(tx, applyResult.graph);
       if (canonicalJson(actualReadback) !== canonicalJson(applyResult.readback)) {
