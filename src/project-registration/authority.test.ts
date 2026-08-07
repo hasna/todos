@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { getDatabase, resetDatabase } from "../db/database.js";
+import { createPlan, getPlan } from "../db/plans.js";
 import { createProject, getProject, updateProject } from "../db/projects.js";
 import { createTaskList, getTaskList, updateTaskList } from "../db/task-lists.js";
+import { createTask, getTask } from "../db/tasks.js";
 import {
   TodosProjectRegistrationError,
   PostgresTodosProjectRegistrationBackend,
@@ -342,6 +344,18 @@ describe("Todos package-owned project registration authority", () => {
       revision: receipt.result_revision,
       digest: receipt.result_digest,
     });
+    const plan = createPlan({
+      name: "HTTP foreign plan",
+      project_id: receipt.target_id!,
+    }, db);
+    const rejected = await client.compensate(inverseRequest(receipt, request));
+    expect(rejected).toMatchObject({
+      outcome: "terminal_nonacceptance",
+      reason: "target_has_dependents",
+      target_id: receipt.target_id,
+      accepted_receipt_id: receipt.receipt_id,
+    });
+    expect(getPlan(plan.id, db)?.project_id).toBe(receipt.target_id);
   });
 
   test("accepts iapp-* project slugs without legacy iproj prefix logic", async () => {
@@ -737,6 +751,83 @@ describe("Todos package-owned project registration authority", () => {
     expect(await authority.compensate(structuredClone(inverse))).toEqual(removed);
   });
 
+  test("refuses project compensation when later project records would be cascaded or detached", async () => {
+    const forward = projectRequest({
+      operation_id: "fleet-resources-project-dependents-0001",
+    });
+    const accepted = await authority.create(forward);
+    const plan = createPlan({
+      name: "Foreign plan",
+      project_id: accepted.target_id!,
+    }, db);
+    const task = createTask({
+      title: "Foreign task",
+      project_id: accepted.target_id!,
+    }, db);
+
+    const rejected = await authority.compensate(inverseRequest(accepted, forward));
+
+    expect(rejected).toMatchObject({
+      outcome: "terminal_nonacceptance",
+      reason: "target_has_dependents",
+      target_id: accepted.target_id,
+      accepted_receipt_id: accepted.receipt_id,
+    });
+    expect(getProject(accepted.target_id!, db)).not.toBeNull();
+    expect(getPlan(plan.id, db)?.project_id).toBe(accepted.target_id);
+    expect(getTask(task.id, db)?.project_id).toBe(accepted.target_id);
+  });
+
+  test("refuses task-list compensation when later tasks would be detached", async () => {
+    const projectForward = projectRequest({
+      operation_id: "fleet-resources-list-dependents-0001",
+    });
+    const projectAccepted = await authority.create(projectForward);
+    const listForward = taskListRequest(projectAccepted.target_id!, {
+      operation_id: projectForward.operation_id,
+    });
+    const listAccepted = await authority.create(listForward);
+    const task = createTask({
+      title: "Foreign list task",
+      project_id: projectAccepted.target_id!,
+      task_list_id: listAccepted.target_id!,
+    }, db);
+
+    const rejected = await authority.compensate(inverseRequest(listAccepted, listForward));
+
+    expect(rejected).toMatchObject({
+      outcome: "terminal_nonacceptance",
+      reason: "target_has_dependents",
+      target_id: listAccepted.target_id,
+      accepted_receipt_id: listAccepted.receipt_id,
+    });
+    expect(getTaskList(listAccepted.target_id!, db)).not.toBeNull();
+    expect(getTask(task.id, db)?.task_list_id).toBe(listAccepted.target_id);
+  });
+
+  test("still compensates an untouched receipt-owned empty task list", async () => {
+    const projectForward = projectRequest({
+      operation_id: "fleet-resources-empty-list-inverse-0001",
+    });
+    const projectAccepted = await authority.create(projectForward);
+    const listForward = taskListRequest(projectAccepted.target_id!, {
+      operation_id: projectForward.operation_id,
+    });
+    const listAccepted = await authority.create(listForward);
+
+    const removed = await authority.compensate(inverseRequest(listAccepted, listForward));
+
+    expect(removed).toMatchObject({
+      outcome: "accepted",
+      direction: "inverse",
+      target_id: listAccepted.target_id,
+      accepted_receipt_id: listAccepted.receipt_id,
+      result_revision: "absent",
+    });
+    expect(getTaskList(listAccepted.target_id!, db)).toBeNull();
+    expect(getProject(projectAccepted.target_id!, db)).not.toBeNull();
+  });
+
   for (const point of [
     "before_object_write",
     "after_object_write",
@@ -891,6 +982,52 @@ describe("Todos package-owned project registration authority", () => {
       .rejects.toMatchObject({
         code: "TODOS_PROJECT_REGISTRATION_ATOMICITY_UNAVAILABLE",
       });
+  });
+
+  test("checks hosted PostgreSQL dependents through every canonical project and task-list reference", async () => {
+    const statements: Array<{ text: string; params: unknown[] | undefined }> = [];
+    const query = async (text: string, params?: unknown[]) => {
+      statements.push({ text, params });
+      if (text.includes("SELECT EXISTS")) return { rows: [{ exists: true }] };
+      return { rows: [] };
+    };
+    const client = {
+      query,
+      async transaction<T>(fn: (transaction: { query: typeof query }) => Promise<T>) {
+        return await fn({ query });
+      },
+    };
+    const backend = new PostgresTodosProjectRegistrationBackend(client, {
+      service: "todos_registration_test",
+      tableName: "todos_sync_records_registration_test",
+      cursorTableName: "todos_sync_cursors_registration_test",
+    });
+
+    await backend.transaction(async (transaction) => {
+      await transaction.lockCompensationWrites();
+      expect(await transaction.hasDependents(
+        "project",
+        "11111111-1111-4111-8111-111111111111",
+      )).toBe(true);
+      await transaction.lockCompensationWrites();
+      expect(await transaction.hasDependents(
+        "task_list",
+        "22222222-2222-4222-8222-222222222222",
+      )).toBe(true);
+    });
+
+    const dependentQueries = statements.filter(({ text }) => text.includes("SELECT EXISTS"));
+    const lockQueries = statements.filter(({ text }) => text.includes("LOCK TABLE"));
+    expect(lockQueries).toHaveLength(2);
+    expect(lockQueries[0]!.text).toContain(
+      "LOCK TABLE todos_sync_records_registration_test IN SHARE ROW EXCLUSIVE MODE",
+    );
+    expect(dependentQueries).toHaveLength(2);
+    expect(dependentQueries[0]!.text).toContain("payload->>'project_id'");
+    expect(dependentQueries[0]!.text).toContain("payload->>'active_project_id'");
+    expect(dependentQueries[0]!.text).toContain("payload->>'assigned_from_project'");
+    expect(dependentQueries[0]!.text).toContain("payload->>'external_project_id'");
+    expect(dependentQueries[1]!.text).toContain("payload->>'task_list_id'");
   });
 
   test("uses typed authority errors for unsupported or malformed calls", async () => {

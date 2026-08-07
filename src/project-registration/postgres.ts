@@ -396,13 +396,33 @@ implements TodosProjectRegistrationBackendTransaction {
     return await this.storage.taskLists.get(id);
   }
 
-  async countTaskLists(projectId: string): Promise<number> {
-    const result = await this.client.query<{ count: number | string }>(`
-      SELECT COUNT(*) AS count FROM ${this.tableName}
-      WHERE service = $1 AND object_type = 'task_lists' AND deleted_at IS NULL
-        AND payload->>'project_id' = $2
-    `, [this.service, projectId]);
-    return Number(result.rows[0]?.count ?? 0);
+  async lockCompensationWrites(): Promise<void> {
+    await this.client.query(
+      `LOCK TABLE ${this.tableName} IN SHARE ROW EXCLUSIVE MODE`,
+    );
+  }
+
+  async hasDependents(
+    resourceKind: TodosProjectRegistrationResourceKind,
+    targetId: string,
+  ): Promise<boolean> {
+    const referencePredicate = resourceKind === "project"
+      ? `(
+          payload->>'project_id' = $2
+          OR payload->>'active_project_id' = $2
+          OR payload->>'assigned_from_project' = $2
+          OR payload->>'external_project_id' = $2
+        )`
+      : "payload->>'task_list_id' = $2";
+    const result = await this.client.query<{ exists: boolean }>(`
+      SELECT EXISTS (
+        SELECT 1 FROM ${this.tableName}
+        WHERE service = $1 AND deleted_at IS NULL
+          AND ${referencePredicate}
+        LIMIT 1
+      ) AS exists
+    `, [this.service, targetId]);
+    return result.rows[0]?.exists === true;
   }
 
   async deleteProject(id: string): Promise<boolean> {

@@ -1343,6 +1343,7 @@ implements TodosProjectRegistrationAuthority {
           );
         }
 
+        await transaction.lockCompensationWrites();
         const object = request.resource_kind === "project"
           ? await transaction.getProject(accepted.target_id!)
           : await transaction.getTaskList(accepted.target_id!);
@@ -1376,10 +1377,10 @@ implements TodosProjectRegistrationAuthority {
             },
           );
         }
-        if (
-          request.resource_kind === "project"
-          && await transaction.countTaskLists(accepted.target_id!) > 0
-        ) {
+        if (await transaction.hasDependents(
+          request.resource_kind,
+          accepted.target_id!,
+        )) {
           return this.terminalFor(
             transaction,
             request,

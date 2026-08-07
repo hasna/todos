@@ -14,6 +14,17 @@ import { sqliteTodosProjectRegistrationSchemaSql } from "./schema.js";
 import type { TodosProjectRegistrationResourceKind } from "./types.js";
 
 const sqliteTransactionTails = new WeakMap<Database, Promise<void>>();
+const PROJECT_REFERENCE_COLUMNS = new Set([
+  "project_id",
+  "active_project_id",
+  "assigned_from_project",
+  "external_project_id",
+]);
+const TASK_LIST_REFERENCE_COLUMNS = new Set(["task_list_id"]);
+
+function quoteSqliteIdentifier(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
+}
 
 function receiptFromRow(row: Record<string, unknown>): TodosProjectRegistrationReceiptRow {
   return {
@@ -304,11 +315,50 @@ implements TodosProjectRegistrationBackendTransaction {
     return await this.storage.taskLists.get(id);
   }
 
-  async countTaskLists(projectId: string): Promise<number> {
-    const row = this.db.query(
-      "SELECT COUNT(*) AS count FROM task_lists WHERE project_id = ?",
-    ).get(projectId) as { count: number | bigint };
-    return Number(row.count);
+  async lockCompensationWrites(): Promise<void> {
+    // BEGIN IMMEDIATE already excludes concurrent writers before any readback.
+  }
+
+  async hasDependents(
+    resourceKind: TodosProjectRegistrationResourceKind,
+    targetId: string,
+  ): Promise<boolean> {
+    const targetTable = resourceKind === "project" ? "projects" : "task_lists";
+    const semanticColumns = resourceKind === "project"
+      ? PROJECT_REFERENCE_COLUMNS
+      : TASK_LIST_REFERENCE_COLUMNS;
+    const tables = this.db.query(`
+      SELECT name FROM sqlite_schema
+      WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+      ORDER BY name
+    `).all() as Array<{ name: string }>;
+
+    for (const { name: tableName } of tables) {
+      const quotedTable = quoteSqliteIdentifier(tableName);
+      const columns = this.db.query(`PRAGMA table_info(${quotedTable})`)
+        .all() as Array<{ name: string }>;
+      const foreignKeys = this.db.query(`PRAGMA foreign_key_list(${quotedTable})`)
+        .all() as Array<{ from: string; table: string }>;
+      const referenceColumns = columns
+        .map((column) => column.name)
+        .filter((columnName) =>
+          semanticColumns.has(columnName)
+          || foreignKeys.some((foreignKey) =>
+            foreignKey.from === columnName && foreignKey.table === targetTable
+          )
+        );
+
+      for (const columnName of referenceColumns) {
+        const row = this.db.query(`
+          SELECT 1 AS found
+          FROM ${quotedTable}
+          WHERE ${quoteSqliteIdentifier(columnName)} = ?
+          LIMIT 1
+        `).get(targetId) as { found: number } | null;
+        if (row) return true;
+      }
+    }
+    return false;
   }
 
   async deleteProject(id: string): Promise<boolean> {

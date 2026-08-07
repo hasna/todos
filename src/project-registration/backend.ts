@@ -118,7 +118,11 @@ export interface TodosProjectRegistrationBackendTransaction {
   createTaskList(input: CreateTaskListInput): Promise<TaskList>;
   getProject(id: string): Promise<Project | null>;
   getTaskList(id: string): Promise<TaskList | null>;
-  countTaskLists(projectId: string): Promise<number>;
+  lockCompensationWrites(): Promise<void>;
+  hasDependents(
+    resourceKind: TodosProjectRegistrationResourceKind,
+    targetId: string,
+  ): Promise<boolean>;
   deleteProject(id: string): Promise<boolean>;
   deleteTaskList(id: string): Promise<boolean>;
 }
