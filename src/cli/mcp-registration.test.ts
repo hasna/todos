@@ -164,14 +164,14 @@ describe("Takumi MCP registration", () => {
 
     expect(unregistered.exitCode).toBe(0);
     expect(unregistered.stderr).toBe("");
-    expect(unregistered.stdout).toContain("Takumi: removed todos MCP server");
+    expect(unregistered.stdout).toContain("Takumi (project): removed todos MCP server");
     expect(readCalls(callLog)).toEqual([
       `mcp add --scope project todos -- ${fixtureRoot.mcpBinary} --stdio`,
-      "mcp remove todos",
+      "mcp remove --scope project todos",
     ]);
   }, 30_000);
 
-  test("registers at user scope with --global", async () => {
+  test("registers and unregisters at user scope with --global", async () => {
     const fixtureRoot = fixture();
     const callLog = installFakeTakumi(fixtureRoot);
 
@@ -185,6 +185,19 @@ describe("Takumi MCP registration", () => {
     expect(registered.stdout).toContain("Takumi (user): registered");
     expect(readCalls(callLog)).toEqual([
       `mcp add --scope user todos -- ${fixtureRoot.mcpBinary} --stdio`,
+    ]);
+
+    const unregistered = await runCli(
+      ["mcp", "--unregister", "takumi", "--global"],
+      fixtureRoot,
+    );
+
+    expect(unregistered.exitCode).toBe(0);
+    expect(unregistered.stderr).toBe("");
+    expect(unregistered.stdout).toContain("Takumi (user): removed todos MCP server");
+    expect(readCalls(callLog)).toEqual([
+      `mcp add --scope user todos -- ${fixtureRoot.mcpBinary} --stdio`,
+      "mcp remove --scope user todos",
     ]);
   }, 30_000);
 });

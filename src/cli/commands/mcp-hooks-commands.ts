@@ -191,13 +191,15 @@ function registerTakumi(binPath: string, global?: boolean): void {
   }
 }
 
-function unregisterTakumi(): void {
+function unregisterTakumi(global?: boolean): void {
+  const scope = global ? "user" : "project";
+  const cmd = `takumi mcp remove --scope ${scope} todos`;
   try {
-    execSync("takumi mcp remove todos", { stdio: "pipe" });
-    console.log(chalk.green(`Takumi: removed todos MCP server`));
+    execSync(cmd, { stdio: "pipe" });
+    console.log(chalk.green(`Takumi (${scope}): removed todos MCP server`));
   } catch {
     console.log(chalk.yellow(`Takumi: could not auto-remove. Run manually:`));
-    console.log(chalk.cyan("  takumi mcp remove todos"));
+    console.log(chalk.cyan(`  ${cmd}`));
   }
 }
 
@@ -264,7 +266,7 @@ function unregisterMcp(agent: string, global?: boolean): void {
       case "codex": unregisterCodex(); break;
       case "gemini": unregisterGemini(); break;
       case "cursor": unregisterCursor(global); break;
-      case "takumi": unregisterTakumi(); break;
+      case "takumi": unregisterTakumi(global); break;
       default: console.error(chalk.red(`Unknown agent: ${a}. Use: ${MCP_AGENT_CHOICES}`));
     }
   }
